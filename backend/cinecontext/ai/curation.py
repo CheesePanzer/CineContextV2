@@ -16,10 +16,10 @@ from ..contracts import Constraints
 from ..domain import RunStatus
 from ..observability import sanitize_message
 from ..settings import LoggingOptions, ToolsOptions
-from .nodes import create_workflow
+from .nodes import create_guide_retry_workflow, create_workflow
 from .ports import ApplicationModelProvider
 from .research_tools import create_research_tools
-from .workflow import WorkflowContext, WorkflowRunner
+from .workflow import CurationState, GuideRetrySnapshot, WorkflowContext, WorkflowRunner
 
 logger = logging.getLogger(__name__)
 
@@ -94,3 +94,60 @@ class CurationService:
                 except Exception:
                     logger.exception("Failed to close curation model", extra=log_context)
                     raise
+
+    async def retry_guide(self, run_id, snapshot: GuideRetrySnapshot):
+        model = None
+        started = monotonic()
+        log_context = {"run_id": str(run_id), "state": CurationState.GUIDE.value}
+        logger.info("Guide retry started selected=%d evidence=%d", len(snapshot.films),
+                    len(snapshot.evidence), extra=log_context)
+        try:
+            model = self.models.create()
+            model.set_run_id(run_id)
+            async with httpx.AsyncClient(timeout=self.tool_options.timeout_seconds) as http:
+                tools = create_research_tools(self.persistence, http, self.tool_options)
+                nodes, transitions = create_guide_retry_workflow(self.persistence)
+                ctx = WorkflowContext(
+                    run_id,
+                    snapshot.constraints,
+                    model,
+                    tools,
+                    state=CurationState.GUIDE,
+                    films=snapshot.films,
+                    selected=snapshot.films,
+                    evidence=snapshot.evidence,
+                    published_evidence=snapshot.published_evidence(),
+                )
+                result = await WorkflowRunner(nodes, transitions).run(ctx)
+                logger.info("Guide retry completed terminal_state=%s elapsed_ms=%d",
+                            result.state.value, int((monotonic() - started) * 1000),
+                            extra={**log_context, "state": result.state.value})
+        except Exception as error:
+            await self._persist_failure(run_id, error, started, log_context)
+        finally:
+            if model:
+                try:
+                    await model.close()
+                except Exception:
+                    logger.exception("Failed to close guide retry model", extra=log_context)
+                    raise
+
+    async def _persist_failure(self, run_id, error, started, log_context):
+        diagnostic_id = str(uuid4())
+        failure_context = {**log_context, "diagnostic_id": diagnostic_id}
+        logger.exception(
+            "Guide retry failed error_type=%s error_message=%s elapsed_ms=%d",
+            type(error).__name__, sanitize_message(error),
+            int((monotonic() - started) * 1000), extra=failure_context,
+        )
+        message = "Guide generation failed. You can retry this phase again."
+        diagnostic = f"Diagnostic {diagnostic_id}"
+        if self.logging_options.include_technical_failure_detail:
+            diagnostic += f": {type(error).__name__}: {sanitize_message(error)}"
+        try:
+            await self.persistence.finish_run(
+                run_id, RunStatus.FAILED, f"{message} {diagnostic}"[:1000]
+            )
+        except Exception:
+            logger.exception("Failed to persist guide retry failure", extra=failure_context)
+            raise

@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import parse_qs
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 from alcedo import ConflictError, NotFoundError, Options
@@ -41,6 +41,7 @@ from cinecontext.ai.workflow import (
     WorkflowRunnerError,
     WorkflowTransition,
     WorkflowTransitionError,
+    GuideRetrySnapshot,
 )
 from cinecontext.contracts import Claim, Constraints, FilmGuide, Guide, TimelineResearch
 from cinecontext.domain import CurationRun, RunStatus
@@ -258,6 +259,17 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         ).run(context(CurationState.GUIDE))
         self.assertEqual(attempts, 2)
         self.assertEqual(result.state, CurationState.COMPLETED)
+
+    async def test_guide_retry_workflow_skips_prior_phases(self):
+        from cinecontext.ai.nodes import create_guide_retry_workflow
+
+        nodes, transitions = create_guide_retry_workflow(SimpleNamespace())
+
+        self.assertEqual(
+            set(nodes),
+            {CurationState.GUIDE, CurationState.PUBLISH, CurationState.PUBLISH_PARTIAL},
+        )
+        self.assertFalse(any(rule.target == CurationState.RATINGS for rule in transitions.transitions))
 
 
 class WebResearchTests(unittest.IsolatedAsyncioTestCase):
@@ -569,6 +581,58 @@ class RunDeletionTests(unittest.IsolatedAsyncioTestCase):
     async def test_delete_reports_missing_run(self):
         with self.assertRaises(NotFoundError):
             await self.service(FakeRunRepository()).delete(uuid4())
+
+
+class GuideRetryClaimTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def service(repository):
+        return RunApplicationService(
+            repository,
+            SimpleNamespace(),
+            FakeUnitOfWork(),
+            SimpleNamespace(mode="mock"),
+        )
+
+    @staticmethod
+    def retryable_run(status=RunStatus.PARTIAL):
+        film = sample_film()
+        evidence = sample_evidence(film.id)
+        run = CurationRun.start(
+            uuid4(), Constraints(topic="test", theme="test").model_dump(mode="json"), "mock"
+        )
+        run.status = status
+        run.stage = "finished"
+        run.error = "old error"
+        run.study_result = {
+            "films": [film.model_dump(mode="json")],
+            "evidence": [evidence.model_dump(mode="json")],
+            "decisions": [],
+            "limitations": [],
+            "follow_ups": 0,
+        }
+        return run
+
+    async def test_retry_claim_hydrates_snapshot_and_reactivates_run(self):
+        run = self.retryable_run()
+
+        snapshot = await self.service(FakeRunRepository(run)).retry_guide(run.id)
+
+        self.assertIsInstance(snapshot, GuideRetrySnapshot)
+        self.assertEqual(snapshot.films[0].id, UUID(run.study_result["films"][0]["id"]))
+        self.assertEqual(run.status, RunStatus.RUNNING)
+        self.assertEqual(run.stage, "generating")
+        self.assertIsNone(run.guide)
+        self.assertIsNone(run.error)
+
+    async def test_retry_claim_rejects_active_or_incomplete_run(self):
+        active = self.retryable_run(RunStatus.RUNNING)
+        with self.assertRaises(ConflictError):
+            await self.service(FakeRunRepository(active)).retry_guide(active.id)
+
+        incomplete = self.retryable_run()
+        incomplete.study_result = None
+        with self.assertRaises(ConflictError):
+            await self.service(FakeRunRepository(incomplete)).retry_guide(incomplete.id)
 
 
 def sample_film():

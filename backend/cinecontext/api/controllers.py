@@ -53,6 +53,18 @@ async def get_run(run_id: UUID, service: Inject[RunApplicationService]):
     return await service.get(run_id)
 
 
+@router.post("/runs/{run_id}/retry-guide", status_code=202)
+async def retry_guide(
+    run_id: UUID,
+    tasks: BackgroundTasks,
+    service: Inject[RunApplicationService],
+    scope_factory: Inject[ServiceScopeFactory],
+):
+    snapshot = await service.retry_guide(run_id)
+    tasks.add_task(CurationJob(scope_factory).retry_guide, run_id, snapshot)
+    return {"run_id": str(run_id), "status": "running", "phase": "guide"}
+
+
 @router.delete("/runs/{run_id}")
 async def delete_run(run_id: UUID, service: Inject[RunApplicationService]):
     await service.delete(run_id)

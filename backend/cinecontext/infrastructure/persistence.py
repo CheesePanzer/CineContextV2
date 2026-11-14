@@ -362,3 +362,10 @@ class CurationJob:
         async with self.scope_factory.create_scope() as scope:
             service = await scope.resolve(CurationService)
             await service.run(run_id, constraints)
+
+    async def retry_guide(self, run_id: UUID, snapshot):
+        from ..ai.curation import CurationService
+
+        async with self.scope_factory.create_scope() as scope:
+            service = await scope.resolve(CurationService)
+            await service.retry_guide(run_id, snapshot)

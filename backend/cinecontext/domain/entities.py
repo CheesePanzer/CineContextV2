@@ -82,6 +82,7 @@ class RunTrigger(StrEnum):
     COMPLETE_PARTIAL = "complete_partial"
     FAIL = "fail"
     INTERRUPT = "interrupt"
+    RETRY_GUIDE = "retry_guide"
 
 
 RUN_FLOW = StateFlow([
@@ -91,6 +92,9 @@ RUN_FLOW = StateFlow([
     StateTransition(RunStatus.RUNNING, RunTrigger.COMPLETE_PARTIAL, RunStatus.PARTIAL),
     StateTransition(RunStatus.RUNNING, RunTrigger.FAIL, RunStatus.FAILED),
     StateTransition(RunStatus.RUNNING, RunTrigger.INTERRUPT, RunStatus.INTERRUPTED),
+    StateTransition(RunStatus.PARTIAL, RunTrigger.RETRY_GUIDE, RunStatus.RUNNING),
+    StateTransition(RunStatus.FAILED, RunTrigger.RETRY_GUIDE, RunStatus.RUNNING),
+    StateTransition(RunStatus.INTERRUPTED, RunTrigger.RETRY_GUIDE, RunStatus.RUNNING),
 ])
 
 
@@ -140,6 +144,20 @@ class CurationRun(AggregateRoot):
         self.guide = guide
         if self.status in {RunStatus.FAILED, RunStatus.INTERRUPTED}:
             self.error = message
+        else:
+            self.error = None
+
+    def begin_guide_retry(self):
+        self.status = RUN_FLOW.transition(
+            RunStatus(self.status), RunTrigger.RETRY_GUIDE,
+        )
+        self.stage = "generating"
+        self.guide = None
+        self.error = None
+        self.progress = [
+            *self.progress,
+            {"stage": "generating", "message": "Retrying viewing guide generation."},
+        ]
 
 
 class CandidateDecision(Entity):

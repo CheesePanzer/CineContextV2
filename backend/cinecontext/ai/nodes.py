@@ -468,3 +468,20 @@ def create_workflow(persistence: CurationPersistence):
         WorkflowTransition(CurationState.PUBLISH_PARTIAL, NodeOutcome.SUCCESS, CurationState.COMPLETED),
     ])
     return nodes, transitions
+
+
+def create_guide_retry_workflow(persistence: CurationPersistence):
+    operations = WorkflowOperations(persistence)
+    nodes = {
+        CurationState.GUIDE: GuideNode(operations, GuideValidator()),
+        CurationState.PUBLISH: PublishNode(operations),
+        CurationState.PUBLISH_PARTIAL: PublishPartialNode(operations),
+    }
+    transitions = TransitionEngine([
+        WorkflowTransition(CurationState.GUIDE, NodeOutcome.RETRY, CurationState.GUIDE),
+        WorkflowTransition(CurationState.GUIDE, NodeOutcome.SUCCESS, CurationState.PUBLISH),
+        WorkflowTransition(CurationState.GUIDE, NodeOutcome.PARTIAL, CurationState.PUBLISH_PARTIAL),
+        WorkflowTransition(CurationState.PUBLISH, NodeOutcome.SUCCESS, CurationState.COMPLETED),
+        WorkflowTransition(CurationState.PUBLISH_PARTIAL, NodeOutcome.SUCCESS, CurationState.COMPLETED),
+    ])
+    return nodes, transitions

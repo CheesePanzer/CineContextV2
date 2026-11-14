@@ -2,8 +2,10 @@ from uuid import UUID
 from alcedo import ConflictError, NotFoundError, UnitOfWork, transactional
 from openai import APIConnectionError, APITimeoutError, AuthenticationError, RateLimitError
 
-from ..contracts import ParseRequest, RunRequest
+from ..contracts import Constraints, ParseRequest, RunRequest
 from ..ai.ports import ApplicationModelProvider
+from ..ai.types import EvidenceRecord, FilmProjection
+from ..ai.workflow import GuideRetrySnapshot
 from ..domain import CurationRun, RunStatus
 from ..domain.repositories import FilmRepository, RunRepository
 from .errors import ModelGatewayError, ModelGatewayTimeoutError
@@ -115,6 +117,31 @@ class RunApplicationService:
         }:
             raise ConflictError("An active research run cannot be deleted.")
         await self.runs.delete_with_data(run_id)
+
+    @transactional
+    async def retry_guide(self, run_id: UUID) -> GuideRetrySnapshot:
+        run = await self.runs.get_for_update(run_id)
+        if run is None:
+            raise NotFoundError("Run not found.")
+        if RunStatus(run.status) not in {
+            RunStatus.PARTIAL,
+            RunStatus.FAILED,
+            RunStatus.INTERRUPTED,
+        }:
+            raise ConflictError("Only a terminal incomplete run can retry guide generation.")
+        study = run.study_result or {}
+        try:
+            snapshot = GuideRetrySnapshot(
+                constraints=Constraints.model_validate(run.constraints),
+                films=[FilmProjection.model_validate(item) for item in study["films"]],
+                evidence=[EvidenceRecord.model_validate(item) for item in study["evidence"]],
+            )
+        except (KeyError, ValueError) as error:
+            raise ConflictError("This run has no persisted guide inputs.") from error
+        if not snapshot.films or not snapshot.published_evidence():
+            raise ConflictError("This run has no persisted guide inputs.")
+        run.begin_guide_retry()
+        return snapshot
 
 
 class StartupService:

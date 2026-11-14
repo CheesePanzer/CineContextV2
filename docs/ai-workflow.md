@@ -113,6 +113,18 @@ DEBUG级别会输出 workflow/node start、node completion、transition context�
 - Guide API error：不重试 validation cycle，进入 ratings 后 partial publish。
 - 进程退出：当前 background task 丢失；下次启动把 queued/running run 标记为 interrupted。
 
+## Guide阶段重跑
+
+`POST /api/runs/{run_id}/retry-guide`会从`runs.constraints`与`runs.study_result`恢复selected films和evidence，使用独立受限状态图：
+
+```text
+GUIDE --retry--> GUIDE
+GUIDE --success--> PUBLISH --> COMPLETED
+GUIDE --partial--> PUBLISH_PARTIAL --> COMPLETED
+```
+
+重跑不执行PLAN、DISCOVER、ASSESS、FOLLOW_UP、SELECT、TIMELINE或RATINGS，也不修改已保存timeline/evidence/decision。认领run时使用行锁，只允许terminal且具备guide输入的run；状态原子切回`running/generating`并清除旧guide/error，避免两个并发请求同时启动。
+
 未处理失败由 `CurationService` 生成 UUID diagnostic ID。文件日志以该 ID 关联唯一的完整stack；`run.error`保留友好消息并附diagnostic ID。默认还附加截断、脱敏后的异常类型和消息，可通过 `APP__LOGGING__INCLUDE_TECHNICAL_FAILURE_DETAIL=false`关闭。模型adapter正常日志只记录schema、model ID、API style、耗时和token usage；crawler URL只记录无userinfo/query/fragment的origin。任何层都不得记录prompt、检索query、evidence/模型输出body、headers或credentials。`CAPTURE_MODEL_RESPONSES`是临时本地诊断例外，使用后必须关闭并清理文件。
 
 ## 安全增加节点

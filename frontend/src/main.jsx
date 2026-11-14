@@ -167,7 +167,7 @@ function storyYear(event) {
   return englishYear ? Number(englishYear[1]) : null;
 }
 
-function Results({run}) {
+function Results({run, onRetryGuide, retryingGuide}) {
   const [axis, setAxis] = useState('viewing');
   const [zoom, setZoom] = useState(100);
   const [filmId, setFilmId] = useState(null);
@@ -218,6 +218,10 @@ function Results({run}) {
     {guide?.introduction && <p className="intro">{guide.introduction}</p>}
     {run.error && <p className="notice" role="alert">{run.error}</p>}
     {run.status === 'partial' && run.progress.at(-1) && <p className="notice">{run.progress.at(-1).message}</p>}
+    {!guide && (study.films?.length ?? 0) > 0 && ['partial', 'failed', 'interrupted'].includes(run.status) &&
+      <button className="button retry-guide" type="button" disabled={retryingGuide} onClick={onRetryGuide}>
+        {retryingGuide ? 'Retrying guide…' : 'Retry guide generation'}
+      </button>}
     {(study.limitations || []).map(note => <p className="notice" key={note}>{note}</p>)}
     {films.size > 0 && <section className="timeline-section" aria-labelledby="film-timeline-heading">
       <div className="section-head">
@@ -308,6 +312,7 @@ function App() {
   const [pollError, setPollError] = useState('');
   const [unavailable, setUnavailable] = useState(false);
   const [recentRuns, setRecentRuns] = useState([]);
+  const [pollRevision, setPollRevision] = useState(0);
   const submission = useRef(null);
   const locked = busy || (!!runId && !unavailable && (!run || !terminal.has(run.status)));
 
@@ -364,7 +369,7 @@ function App() {
     }
     poll();
     return () => { active = false; clearTimeout(timer); };
-  }, [runId]);
+  }, [runId, pollRevision]);
 
   function editPrompt(value) {
     submission.current = null;
@@ -429,6 +434,23 @@ function App() {
       await request(`/runs/${item.run_id}`, {method: 'DELETE'});
       setRecentRuns(items => items.filter(runItem => runItem.run_id !== item.run_id));
       if (item.run_id === runId) openRun(null);
+    } catch (problem) {
+      setError(problem.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retryGuide() {
+    if (!runId || busy || !confirm('Retry guide generation using the saved films and evidence?')) return;
+    setBusy(true);
+    setError('');
+    try {
+      await post(`/runs/${runId}/retry-guide`, {});
+      setPollError('');
+      setUnavailable(false);
+      setRun(null);
+      setPollRevision(value => value + 1);
     } catch (problem) {
       setError(problem.message);
     } finally {
@@ -514,7 +536,7 @@ function App() {
         </details>}
       </aside>
       <section className="workspace" aria-label="Research results">
-        {finished ? <Results key={run.run_id} run={run} />
+        {finished ? <Results key={run.run_id} run={run} onRetryGuide={retryGuide} retryingGuide={busy} />
           : runId ? <div className="empty" aria-live="polite">
             <span className="kicker">Research progress</span><h1>{unavailable ? 'Unable to open this run' : run ? stageNames[run.stage] : 'Loading run'}</h1>
             <p>{unavailable ? 'Open a recent run or start a new one.' : run?.progress.at(-1)?.message || 'Progress updates automatically while the run is active.'}</p>
