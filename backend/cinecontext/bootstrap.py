@@ -9,7 +9,8 @@ from fastapi.staticfiles import StaticFiles
 from alcedo import AlcedoRuntime, Configuration, Entity, configure_alcedo
 from .api import router
 from .infrastructure.services import add_cinecontext_services
-from .settings import ToolsOptions
+from .observability import configure_logging
+from .settings import LoggingOptions, ToolsOptions
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -22,6 +23,10 @@ def bootstrap_app(
     serve_frontend: bool = True,
     model_settings: dict | None = None,
 ) -> FastAPI:
+    logging_settings = configuration.section("logging")
+    logging_options = LoggingOptions.model_validate(logging_settings)
+    configure_logging(logging_options, ROOT)
+
     @asynccontextmanager
     async def lifespan(app):
         runtime = app.state.alcedo
@@ -42,6 +47,7 @@ def bootstrap_app(
             "database": database_settings,
             "model": model_settings or configuration.section("model"),
             "tools": configuration.section("tools"),
+            "logging": logging_settings,
         },
         base_path=ROOT,
     )
@@ -49,6 +55,7 @@ def bootstrap_app(
         app, configuration=runtime_configuration, metadata=Entity.metadata
     )
     runtime.options.add(ToolsOptions, "tools")
+    runtime.options.add(LoggingOptions, "logging")
     add_cinecontext_services(runtime)
     register(runtime)
     app.include_router(router, prefix="/api")

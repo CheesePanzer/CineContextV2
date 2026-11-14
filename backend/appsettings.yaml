@@ -1,6 +1,17 @@
 database:
   create_schema: false
 
+logging:
+  level: INFO
+  console_enabled: true
+  file_enabled: true
+  path: .runtime/logs/cinecontext.log
+  max_bytes: 10000000
+  backup_count: 5
+  include_technical_failure_detail: true
+  capture_model_responses: false
+  model_response_path: .runtime/logs/model-responses
+
 model:
   mode: openai
   api_style: chat_completions
@@ -9,6 +20,7 @@ model:
   json_response: true
   thinking: default
   prompt_cache: false
+  structured_output_retries: 1
 
 tools:
   timeout_seconds: 15

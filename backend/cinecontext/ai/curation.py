@@ -1,4 +1,6 @@
 import logging
+from time import monotonic
+from uuid import uuid4
 
 import httpx
 from alcedo import Options
@@ -12,7 +14,8 @@ from openai import (
 from ..application.ports import CurationPersistence
 from ..contracts import Constraints
 from ..domain import RunStatus
-from ..settings import ToolsOptions
+from ..observability import sanitize_message
+from ..settings import LoggingOptions, ToolsOptions
 from .nodes import create_workflow
 from .ports import ApplicationModelProvider
 from .research_tools import create_research_tools
@@ -27,22 +30,45 @@ class CurationService:
         persistence: CurationPersistence,
         models: ApplicationModelProvider,
         tools: Options[ToolsOptions],
+        logging_options: Options[LoggingOptions],
     ):
         self.persistence = persistence
         self.models = models
         self.tool_options = tools.value
+        self.logging_options = logging_options.value
 
     async def run(self, run_id, constraints: Constraints):
         model = None
+        started = monotonic()
+        provider_id = getattr(self.models, "model_id", None) or "default"
+        log_context = {"run_id": str(run_id)}
+        logger.info(
+            "Curation started model_mode=%s provider_id=%s requested_count=%d",
+            self.models.mode.value, provider_id, constraints.count, extra=log_context,
+        )
         try:
             model = self.models.create()
+            model.set_run_id(run_id)
             async with httpx.AsyncClient(timeout=self.tool_options.timeout_seconds) as http:
                 tools = create_research_tools(self.persistence, http, self.tool_options)
                 nodes, transitions = create_workflow(self.persistence)
                 ctx = WorkflowContext(run_id, constraints, model, tools)
-                await WorkflowRunner(nodes, transitions).run(ctx)
+                result = await WorkflowRunner(nodes, transitions).run(ctx)
+                logger.info(
+                    "Curation completed terminal_state=%s elapsed_ms=%d films=%d evidence=%d "
+                    "decisions=%d selected=%d",
+                    result.state.value, int((monotonic() - started) * 1000), len(result.films),
+                    len(result.evidence), len(result.decisions), len(result.selected),
+                    extra={**log_context, "state": result.state.value},
+                )
         except Exception as error:
-            logger.error("Curation %s failed: %s", run_id, type(error).__name__)
+            diagnostic_id = str(uuid4())
+            failure_context = {**log_context, "diagnostic_id": diagnostic_id}
+            logger.exception(
+                "Curation failed error_type=%s error_message=%s elapsed_ms=%d",
+                type(error).__name__, sanitize_message(error),
+                int((monotonic() - started) * 1000), extra=failure_context,
+            )
             message = "The run failed. Check the model and tool connections before retrying."
             if isinstance(error, APITimeoutError):
                 message = "The model timed out. You can run the research again."
@@ -52,7 +78,19 @@ class CurationService:
                 message = "Model authentication failed. Check the server API key."
             elif isinstance(error, APIConnectionError):
                 message = "Cannot reach the model service. Try again shortly."
-            await self.persistence.finish_run(run_id, RunStatus.FAILED, message)
+            diagnostic = f"Diagnostic {diagnostic_id}"
+            if self.logging_options.include_technical_failure_detail:
+                diagnostic += f": {type(error).__name__}: {sanitize_message(error)}"
+            persisted_message = f"{message} {diagnostic}"[:1000]
+            try:
+                await self.persistence.finish_run(run_id, RunStatus.FAILED, persisted_message)
+            except Exception:
+                logger.exception("Failed to persist curation failure", extra=failure_context)
+                raise
         finally:
             if model:
-                await model.close()
+                try:
+                    await model.close()
+                except Exception:
+                    logger.exception("Failed to close curation model", extra=log_context)
+                    raise

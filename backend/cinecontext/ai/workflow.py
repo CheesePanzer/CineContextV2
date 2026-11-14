@@ -2,6 +2,8 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+import logging
+from time import monotonic
 from typing import Protocol
 from uuid import UUID
 
@@ -16,6 +18,8 @@ from .types import (
     StudyPayload,
     ValidatedDecision,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_FOLLOW_UP_QUERIES = 4
 MAX_FOLLOW_UPS_PER_FILM = 2
@@ -142,17 +146,49 @@ class WorkflowRunner:
         self.max_steps = max_steps
 
     async def run(self, ctx: WorkflowContext) -> WorkflowContext:
-        for _ in range(self.max_steps):
+        workflow_started = monotonic()
+        logger.debug("Workflow started", extra=self._context(ctx))
+        for step in range(1, self.max_steps + 1):
             if ctx.state in TERMINAL_STATES:
+                logger.info(
+                    "Workflow completed elapsed_ms=%d films=%d evidence=%d decisions=%d selected=%d steps=%d",
+                    int((monotonic() - workflow_started) * 1000), len(ctx.films), len(ctx.evidence),
+                    len(ctx.decisions), len(ctx.selected), step - 1, extra=self._context(ctx),
+                )
                 return ctx
             node = self.nodes.get(ctx.state)
             if node is None:
                 raise WorkflowRunnerError(f"no node registered for state={ctx.state.value}")
+            state = ctx.state
+            node_name = type(node).__name__
+            started = monotonic()
+            logger.debug("Node started node=%s step=%d", node_name, step, extra=self._context(ctx))
             ctx.outcome = None
-            result = await node.run(ctx)
-            if result is not ctx:
-                raise WorkflowRunnerError(f"node {ctx.state.value} replaced the workflow context")
-            if ctx.outcome is None:
-                raise WorkflowRunnerError(f"node {ctx.state.value} did not set an outcome")
-            ctx.state = self.transitions.next_state(ctx)
+            try:
+                result = await node.run(ctx)
+                if result is not ctx:
+                    raise WorkflowRunnerError(f"node {state.value} replaced the workflow context")
+                if ctx.outcome is None:
+                    raise WorkflowRunnerError(f"node {state.value} did not set an outcome")
+                next_state = self.transitions.next_state(ctx)
+            except Exception as error:
+                logger.error(
+                    "Node failed node=%s step=%d error_type=%s elapsed_ms=%d",
+                    node_name, step, type(error).__name__,
+                    int((monotonic() - started) * 1000), extra=self._context(ctx),
+                )
+                raise
+            logger.debug(
+                "Node completed node=%s step=%d outcome=%s next_state=%s elapsed_ms=%d "
+                "films=%d evidence=%d decisions=%d selected=%d follow_up_attempts=%d guide_attempts=%d",
+                node_name, step, ctx.outcome.value, next_state.value,
+                int((monotonic() - started) * 1000), len(ctx.films), len(ctx.evidence),
+                len(ctx.decisions), len(ctx.selected), sum(ctx.follow_up_attempts.values()),
+                ctx.guide_attempts, extra=self._context(ctx),
+            )
+            ctx.state = next_state
         raise WorkflowRunnerError(f"workflow exceeded step limit of {self.max_steps}")
+
+    @staticmethod
+    def _context(ctx: WorkflowContext) -> dict:
+        return {"run_id": str(ctx.run_id), "state": ctx.state.value}

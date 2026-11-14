@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+import logging
 from typing import Protocol
 from uuid import UUID
 
@@ -15,6 +16,8 @@ from .local import LocalResearchProvider
 from .omdb import OmdbRatingsProvider
 from .ratings import RatingStore
 from .tmdb import TmdbMetadataProvider
+
+logger = logging.getLogger(__name__)
 
 
 class FilmMetadataProvider(Protocol):
@@ -111,7 +114,14 @@ def create_research_tools(
     ratings = OmdbRatingsProvider(http, options.omdb, rating_store)
     if options.brave.enabled:
         web = BraveSearchProvider(http, options.brave)
+        web_name = "brave"
     else:
         crawler = WebCrawler(http, options.crawler, resolver)
         web = DuckDuckGoSearchProvider(options.duckduckgo, options.crawler, crawler)
+        web_name = "duckduckgo"
+    logger.debug(
+        "Research providers selected web=%s metadata=%s ratings=%s crawler=%s",
+        web_name, "tmdb" if options.tmdb.enabled else "local",
+        "omdb" if options.omdb.enabled else "disabled", options.crawler.enabled,
+    )
     return ResearchToolsFacade(local, metadata, web, ratings, options)

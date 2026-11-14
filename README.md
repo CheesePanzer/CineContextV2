@@ -61,6 +61,8 @@ CINECONTEXT_APP=production APP__MODEL__API_KEY='<key>' \
 APP__MODEL__MODEL_ID='<model>' ./scripts/start.sh
 ```
 
+运行日志默认写入 `.runtime/logs/cinecontext.log`；配置、轮转和按 `run_id`/diagnostic ID 排障见 [部署文档](docs/deployment.md#日志与故障关联)。
+
 ## 架构概览
 
 ```text

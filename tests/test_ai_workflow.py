@@ -1,10 +1,18 @@
 import unittest
+import logging
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.parse import parse_qs
 from uuid import uuid4
 
 import httpx
-from alcedo import ConflictError, NotFoundError
+from alcedo import ConflictError, NotFoundError, Options
+from pydantic import BaseModel
+from cinecontext.ai.curation import CurationService
+from cinecontext.ai.openai_model import ModelOutputValidationError, ModelResponse, OpenAIModel
+from cinecontext.ai.nodes import WorkflowOperations
 from cinecontext.application.services import RunApplicationService
 from cinecontext.ai.types import (
     DecisionStatus,
@@ -17,6 +25,7 @@ from cinecontext.ai.types import (
     StudyPayload,
     ValidatedTimeline,
     TimelineAxis,
+    OperationName,
 )
 from cinecontext.ai.research_tools import create_research_tools
 from cinecontext.ai.research_tools.crawler import VisibleHTMLParser, validate_public_url
@@ -35,7 +44,8 @@ from cinecontext.ai.workflow import (
 )
 from cinecontext.contracts import Claim, Constraints, FilmGuide, Guide, TimelineResearch
 from cinecontext.domain import CurationRun, RunStatus
-from cinecontext.settings import ToolsOptions
+from cinecontext.observability import configure_logging, sanitize_message
+from cinecontext.settings import LoggingOptions, ModelOptions, ToolsOptions
 
 
 def context(state=CurationState.PLAN):
@@ -153,9 +163,10 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_runner_requires_an_outcome(self):
         with self.assertRaisesRegex(WorkflowRunnerError, "did not set an outcome"):
-            await WorkflowRunner(
-                {CurationState.PLAN: OutcomeNode(None)}, TransitionEngine([])
-            ).run(context())
+            with self.assertLogs("cinecontext.ai.workflow", level="ERROR"):
+                await WorkflowRunner(
+                    {CurationState.PLAN: OutcomeNode(None)}, TransitionEngine([])
+                ).run(context())
 
     async def test_runner_requires_a_registered_node(self):
         with self.assertRaisesRegex(WorkflowRunnerError, "no node registered"):
@@ -194,6 +205,35 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         ).run(context(CurationState.ASSESS))
         self.assertEqual(calls, [CurationState.ASSESS, CurationState.FOLLOW_UP, CurationState.ASSESS])
         self.assertEqual(result.state, CurationState.COMPLETED)
+
+    async def test_runner_logs_node_and_transition_context(self):
+        transitions = TransitionEngine([
+            WorkflowTransition(CurationState.PLAN, NodeOutcome.SUCCESS, CurationState.COMPLETED)
+        ])
+        ctx = context()
+
+        records = []
+
+        class Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        workflow_logger = logging.getLogger("cinecontext.ai.workflow")
+        handler = Capture()
+        workflow_logger.addHandler(handler)
+        workflow_logger.setLevel(logging.DEBUG)
+        try:
+            await WorkflowRunner(
+                {CurationState.PLAN: OutcomeNode(NodeOutcome.SUCCESS)}, transitions
+            ).run(ctx)
+        finally:
+            workflow_logger.removeHandler(handler)
+
+        output = "\n".join(record.getMessage() for record in records)
+        self.assertIn("Node started", output)
+        self.assertIn("Node completed", output)
+        self.assertIn("next_state=completed", output)
+        self.assertTrue(any(record.run_id == str(ctx.run_id) for record in records))
 
     async def test_guide_retry_is_a_new_engine_cycle(self):
         transitions = TransitionEngine([
@@ -305,6 +345,182 @@ class WebResearchTests(unittest.IsolatedAsyncioTestCase):
             ).search_web("test film")
 
         self.assertEqual(evidence, [])
+
+
+class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
+    def test_sanitize_message_redacts_secrets_and_truncates(self):
+        message = (
+            "Authorization: Bearer abc.def api_key=super-secret password=hunter2 "
+            "https://user:pass@example.com/path token=another-secret " + "x" * 200
+        )
+
+        result = sanitize_message(message, 140)
+
+        for secret in ("abc.def", "super-secret", "hunter2", "user:pass", "another-secret"):
+            self.assertNotIn(secret, result)
+        self.assertLessEqual(len(result), 140)
+        self.assertTrue(result.endswith("..."))
+
+    def test_configure_logging_is_idempotent_and_writes_file(self):
+        logger = logging.getLogger("cinecontext")
+        existing = list(logger.handlers)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                options = LoggingOptions(
+                    console_enabled=False, file_enabled=True, path="logs/test.log",
+                    max_bytes=10000, backup_count=1,
+                )
+                configure_logging(options, directory)
+                configure_logging(options, directory)
+                logger.info("test event")
+                for handler in logger.handlers:
+                    handler.flush()
+
+                self.assertEqual(len(logger.handlers), 1)
+                content = (Path(directory) / "logs" / "test.log").read_text(encoding="utf-8")
+                self.assertIn("test event", content)
+                self.assertIn("run_id=-", content)
+                for handler in list(logger.handlers):
+                    if getattr(handler, "_cinecontext_handler", False):
+                        logger.removeHandler(handler)
+                        handler.close()
+        finally:
+            for handler in list(logger.handlers):
+                if getattr(handler, "_cinecontext_handler", False):
+                    logger.removeHandler(handler)
+                    handler.close()
+            for handler in existing:
+                if handler not in logger.handlers:
+                    logger.addHandler(handler)
+
+    async def test_failed_operation_persists_safe_diagnostic_detail(self):
+        class Persistence:
+            def __init__(self):
+                self.calls = []
+
+            async def record_tool_call(self, *args):
+                self.calls.append(args)
+
+        persistence = Persistence()
+        ctx = context(CurationState.DISCOVER)
+
+        async def fail():
+            raise ValueError("api_key=do-not-store invalid response")
+
+        with self.assertLogs("cinecontext.ai.nodes", level="ERROR"):
+            with self.assertRaises(ValueError):
+                await WorkflowOperations(persistence).logged(
+                    ctx, OperationName.SEARCH_WEB, fail, {"caller": "test"}
+                )
+
+        detail = persistence.calls[0][-1]
+        self.assertEqual(detail["error_type"], "ValueError")
+        self.assertEqual(detail["state"], "discover")
+        self.assertEqual(detail["caller"], "test")
+        self.assertIn("[REDACTED]", detail["error_message"])
+        self.assertNotIn("do-not-store", detail["error_message"])
+
+    async def test_curation_failure_persists_diagnostic_id_and_technical_error(self):
+        class Persistence:
+            def __init__(self):
+                self.finished = None
+
+            async def finish_run(self, *args):
+                self.finished = args
+
+        class Provider:
+            mode = SimpleNamespace(value="mock")
+            model_id = "safe-provider"
+
+            def create(self):
+                raise RuntimeError("provider failed token=do-not-store")
+
+        persistence = Persistence()
+        service = CurationService(
+            persistence, Provider(), Options(ToolsOptions()),
+            Options(LoggingOptions(include_technical_failure_detail=True)),
+        )
+
+        with self.assertLogs("cinecontext.ai.curation", level="ERROR"):
+            await service.run(uuid4(), Constraints(topic="test", theme="test", count=1))
+
+        _, status, message = persistence.finished
+        self.assertEqual(status, RunStatus.FAILED)
+        self.assertRegex(message, r"Diagnostic [0-9a-f-]{36}: RuntimeError: provider failed")
+        self.assertIn("[REDACTED]", message)
+        self.assertNotIn("do-not-store", message)
+
+
+class StructuredModelOutputTests(unittest.IsolatedAsyncioTestCase):
+    class Result(BaseModel):
+        value: str
+
+    async def test_invalid_json_is_retried_then_succeeds(self):
+        model = OpenAIModel(ModelOptions(
+            api_key="test", model_id="test", structured_output_retries=1,
+        ), LoggingOptions(capture_model_responses=False))
+        responses = iter([
+            ('{"value":"truncated"', "length"),
+            ('{"value":"complete"}', "stop"),
+        ])
+
+        async def complete(system, payload):
+            content, finish_reason = next(responses)
+            return ModelResponse(content, finish_reason)
+
+        model._chat_complete = complete
+        try:
+            with self.assertLogs("cinecontext.ai.openai_model", level="WARNING") as logs:
+                result = await model.complete(self.Result, "Return data.", {})
+            self.assertEqual(result.value, "complete")
+            self.assertTrue(any("finish_reason=length" in item for item in logs.output))
+        finally:
+            await model.close()
+
+    async def test_exhausted_validation_raises_safe_error_without_response_body(self):
+        model = OpenAIModel(ModelOptions(
+            api_key="test", model_id="test", structured_output_retries=0,
+        ), LoggingOptions(capture_model_responses=False))
+
+        async def complete(system, payload):
+            return ModelResponse('{"value":"sensitive-source-text"', "length")
+
+        model._chat_complete = complete
+        try:
+            with self.assertLogs("cinecontext.ai.openai_model", level="ERROR"):
+                with self.assertRaises(ModelOutputValidationError) as caught:
+                    await model.complete(self.Result, "Return data.", {})
+            self.assertIn("finish_reason=length", str(caught.exception))
+            self.assertNotIn("sensitive-source-text", str(caught.exception))
+        finally:
+            await model.close()
+
+    async def test_raw_response_capture_is_isolated_and_records_finish_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = OpenAIModel(
+                ModelOptions(api_key="test", model_id="test", structured_output_retries=0),
+                LoggingOptions(
+                    capture_model_responses=True,
+                    model_response_path=directory,
+                ),
+            )
+            model.set_run_id(uuid4())
+
+            async def complete(system, payload):
+                return ModelResponse('{"value":"captured"}', "stop", "hidden reasoning")
+
+            model._chat_complete = complete
+            try:
+                await model.complete(self.Result, "Return data.", {})
+                files = list(Path(directory).glob("*.txt"))
+                self.assertEqual(len(files), 1)
+                content = files[0].read_text(encoding="utf-8")
+                self.assertIn("finish_reason=stop", content)
+                self.assertIn("reasoning_length=16", content)
+                self.assertIn('{"value":"captured"}', content)
+                self.assertIn("hidden reasoning", content)
+            finally:
+                await model.close()
 
 class FakeRunRepository:
     def __init__(self, run=None):

@@ -1,10 +1,14 @@
 from html.parser import HTMLParser
+import logging
 from urllib.parse import parse_qs, unquote, urljoin, urlsplit
 from uuid import UUID
 
 from ...settings import CrawlerOptions, DuckDuckGoOptions
+from ...observability import safe_url
 from ..types import EvidenceDraft, EvidenceKind, SearchResult
 from .crawler import WebCrawler
+
+logger = logging.getLogger(__name__)
 
 
 def _classes(attributes):
@@ -83,13 +87,17 @@ class DuckDuckGoSearchProvider:
 
     async def search(self, query: str, film_id: UUID | None = None) -> list[EvidenceDraft]:
         if not self.options.enabled:
+            logger.debug("DuckDuckGo search skipped provider_disabled=true")
             return []
+        endpoint = safe_url(self.options.endpoint)
+        logger.debug("DuckDuckGo search started endpoint=%s", endpoint)
         fetched = await self.crawler.fetch_text(
             self.options.endpoint,
             params={"q": query[: self.options.query_length]},
             byte_limit=self.crawler_options.response_byte_limit,
         )
         if fetched is None:
+            logger.debug("DuckDuckGo search completed endpoint=%s results=0 evidence=0", endpoint)
             return []
         _, html = fetched
         parser = DuckDuckGoHTMLParser(self.options.endpoint)
@@ -105,10 +113,13 @@ class DuckDuckGoSearchProvider:
                 break
 
         evidence = []
+        crawled_count = 0
+        snippet_count = 0
         for index, result in enumerate(results):
             should_crawl = self.crawler_options.enabled and index < self.crawler_options.max_pages
             page = await self.crawler.fetch_page(result) if should_crawl else None
             if page and page.text:
+                crawled_count += 1
                 evidence.append(
                     EvidenceDraft(
                         passage_id=None,
@@ -121,6 +132,7 @@ class DuckDuckGoSearchProvider:
                     )
                 )
             elif result.snippet:
+                snippet_count += 1
                 evidence.append(
                     EvidenceDraft(
                         passage_id=None,
@@ -132,4 +144,8 @@ class DuckDuckGoSearchProvider:
                         kind=EvidenceKind.SEARCH_SUMMARY,
                     )
                 )
+        logger.debug(
+            "DuckDuckGo search completed endpoint=%s results=%d evidence=%d crawled=%d snippets=%d",
+            endpoint, len(results), len(evidence), crawled_count, snippet_count,
+        )
         return evidence

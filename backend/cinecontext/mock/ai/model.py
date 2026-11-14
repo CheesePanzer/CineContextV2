@@ -27,6 +27,9 @@ REGIONS = {
 class MockModel:
     mode = ModelMode.MOCK
 
+    def set_run_id(self, run_id) -> None:
+        pass
+
     async def close(self):
         pass
 

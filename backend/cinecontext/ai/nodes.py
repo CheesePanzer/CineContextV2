@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from collections import defaultdict
 from time import monotonic
 from uuid import UUID
@@ -11,6 +12,7 @@ from pydantic import ValidationError
 from ..application.ports import CurationPersistence
 from ..contracts import FilmAssessment, TimelineResearch
 from ..domain import RunStatus
+from ..observability import sanitize_message
 from .guide_validation import GuideValidator
 from .timeline import TimelineBuilder
 from .types import (
@@ -27,6 +29,8 @@ from .types import (
     ToolCallStatus,
     ValidatedDecision,
 )
+
+logger = logging.getLogger(__name__)
 from .workflow import (
     MAX_FOLLOW_UP_QUERIES,
     MAX_FOLLOW_UPS_PER_FILM,
@@ -45,19 +49,41 @@ class WorkflowOperations:
 
     async def logged(self, ctx, operation: OperationName, action, detail=None):
         started = monotonic()
+        log_context = self._context(ctx, operation)
+        logger.debug("Operation started", extra=log_context)
         try:
             result = await action()
         except Exception as error:
-            await self._record(ctx, operation, ToolCallStatus.FAILED, started, {**(detail or {}), "error": type(error).__name__})
+            error_detail = {
+                **(detail or {}),
+                "error_type": type(error).__name__,
+                "error_message": sanitize_message(error),
+                "state": ctx.state.value,
+            }
+            logger.error(
+                "Operation failed error_type=%s error_message=%s elapsed_ms=%d",
+                type(error).__name__, sanitize_message(error),
+                int((monotonic() - started) * 1000), extra=log_context,
+            )
+            await self._record(ctx, operation, ToolCallStatus.FAILED, started, error_detail)
             raise
         status = ToolCallStatus.OK if result else ToolCallStatus.EMPTY
         await self._record(ctx, operation, status, started, detail or {})
+        logger.debug(
+            "Operation completed status=%s elapsed_ms=%d result=%s",
+            status.value, int((monotonic() - started) * 1000), self._result_summary(result),
+            extra=log_context,
+        )
         return result
 
     async def optional(self, ctx, operation, action):
         try:
             return await self.logged(ctx, operation, action)
-        except (httpx.HTTPError, ValueError, KeyError):
+        except (httpx.HTTPError, ValueError, KeyError) as error:
+            logger.warning(
+                "Optional operation degraded error_type=%s error_message=%s",
+                type(error).__name__, sanitize_message(error), extra=self._context(ctx, operation),
+            )
             notice = {
                 OperationName.LOOKUP_MOVIE: "TMDB metadata could not be verified for some candidates.",
                 OperationName.LOOKUP_RATINGS: "External ratings are unavailable for some films.",
@@ -81,6 +107,10 @@ class WorkflowOperations:
             ]
             persisted = await self.persistence.add_evidence(ctx.run_id, payload)
             ctx.evidence.extend(EvidenceRecord.model_validate(item) for item in persisted)
+        logger.debug(
+            "Evidence capture input_count=%d new_count=%d total_count=%d",
+            len(rows), len(snapshots), len(ctx.evidence), extra=self._context(ctx, "evidence.capture"),
+        )
 
     async def advance(self, ctx, stage, message):
         await self.persistence.advance_run(ctx.run_id, stage, message)
@@ -89,6 +119,19 @@ class WorkflowOperations:
         await self.persistence.record_tool_call(
             ctx.run_id, operation.value, status.value, int((monotonic() - started) * 1000), detail
         )
+
+    @staticmethod
+    def _context(ctx, operation):
+        value = operation.value if isinstance(operation, OperationName) else str(operation)
+        return {"run_id": str(ctx.run_id), "state": ctx.state.value, "operation": value}
+
+    @staticmethod
+    def _result_summary(result):
+        if result is None:
+            return "None"
+        if isinstance(result, (list, tuple, set, dict)):
+            return f"{type(result).__name__}[{len(result)}]"
+        return type(result).__name__
 
 
 class PlanNode:

@@ -1,7 +1,27 @@
 from alcedo import OptionsBase
+from enum import StrEnum
 from pydantic import BaseModel, Field, model_validator
 
 from .ai.types import ModelApiStyle, ModelMode, ThinkingMode
+
+
+class LoggingLevel(StrEnum):
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
+class LoggingOptions(OptionsBase):
+    level: LoggingLevel = LoggingLevel.INFO
+    console_enabled: bool = True
+    file_enabled: bool = True
+    path: str = ".runtime/logs/cinecontext.log"
+    max_bytes: int = Field(default=10_000_000, ge=1)
+    backup_count: int = Field(default=5, ge=0)
+    include_technical_failure_detail: bool = True
+    capture_model_responses: bool = False
+    model_response_path: str = ".runtime/logs/model-responses"
 
 
 class ModelOptions(OptionsBase):
@@ -17,6 +37,7 @@ class ModelOptions(OptionsBase):
     json_response: bool = True
     thinking: ThinkingMode = ThinkingMode.DEFAULT
     prompt_cache: bool = False
+    structured_output_retries: int = Field(default=1, ge=0, le=3)
 
     @model_validator(mode="after")
     def validate_credentials(self):

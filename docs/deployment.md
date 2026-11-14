@@ -176,6 +176,7 @@ APP__MODEL__THINKING=disabled
 | `APP__MODEL__JSON_RESPONSE` | `true`；chat 路径请求 JSON object |
 | `APP__MODEL__THINKING` | `default`、`enabled`、`disabled`；非 default 作为 chat extra body |
 | `APP__MODEL__PROMPT_CACHE` | `false`；Responses 路径添加 prompt cache key |
+| `APP__MODEL__STRUCTURED_OUTPUT_RETRIES` | `1`；结构化 JSON 无效或不完整时重新生成整个对象，0 到 3 |
 
 ### 工具 `APP__TOOLS__*`
 
@@ -230,6 +231,40 @@ curl http://127.0.0.1:8765/api/health
 
 响应包含 `status`、`model_mode`、`model_id`、`web_enabled`、`metadata_enabled`、`ratings_enabled`。它报告已装配配置，不会主动探测每个外部 provider，也不是数据库深度检查。
 
+## 日志与故障关联
+
+应用只配置 `cinecontext` logger 层级，不改变 Uvicorn、SQLAlchemy 或 Alcedo 的全局 logging。默认同时写 stderr 和根目录 `.runtime/logs/cinecontext.log`，文件达到 10 MB 后轮转并保留 5 份。可用以下变量覆盖：
+
+| 变量 | 默认值/作用 |
+|---|---|
+| `APP__LOGGING__LEVEL` | `INFO`；可选 `DEBUG`、`INFO`、`WARNING`、`ERROR` |
+| `APP__LOGGING__CONSOLE_ENABLED` | `true`；输出到 stderr |
+| `APP__LOGGING__FILE_ENABLED` | `true`；启用轮转文件 |
+| `APP__LOGGING__PATH` | `.runtime/logs/cinecontext.log`；相对路径从仓库根解析 |
+| `APP__LOGGING__MAX_BYTES` | `10000000`；单文件轮转阈值 |
+| `APP__LOGGING__BACKUP_COUNT` | `5`；轮转文件数量 |
+| `APP__LOGGING__INCLUDE_TECHNICAL_FAILURE_DETAIL` | `true`；在 `run.error` 中附加清理、截断后的异常类型和消息 |
+| `APP__LOGGING__CAPTURE_MODEL_RESPONSES` | `false`；仅本地诊断时开启，把原始模型响应写入隔离目录 |
+| `APP__LOGGING__MODEL_RESPONSE_PATH` | `.runtime/logs/model-responses`；原始响应诊断目录 |
+
+实时查看：
+
+```powershell
+Get-Content .\.runtime\logs\cinecontext.log -Wait -Tail 100
+```
+
+```bash
+tail -n 100 -f .runtime/logs/cinecontext.log
+```
+
+排障时先从 API 返回的 `run_id` 或 `run.error` 中的 `diagnostic_id` 搜索日志。文件日志包含节点、transition、operation、耗时和完整 Python stack；数据库 `tool_calls` 是单次模型/工具 operation 的状态、耗时和安全失败摘要；`run.error` 是面向用户的终态消息与诊断关联 ID。三者用途不同，不应把文件日志直接作为 API 响应。
+
+`INCLUDE_TECHNICAL_FAILURE_DETAIL=true` 有利于当前调试，但即使经过常见 token、key、password、Authorization 和 URL userinfo 清理，第三方异常文本仍可能包含未识别的敏感值。高敏感生产环境可将其设为 `false`，此时 `run.error` 只保留友好消息和 diagnostic ID。日志代码不得记录 prompt、query、evidence/response body、headers、`.env`、数据库凭据或 API key；新增 provider 时仍需审查异常消息与 URL 字段。
+
+结构化输出持续失败时，可在受控本地环境临时设置 `APP__LOGGING__CAPTURE_MODEL_RESPONSES=true`。每次响应会单独写入 `MODEL_RESPONSE_PATH`，文件名包含 run ID、schema 和 attempt，并记录 finish reason/content length。文件正文可能包含用户问题和来源内容，不能上传、提交或在共享生产环境长期启用；诊断完成后应关闭并删除目录。
+
+如果日志出现 `finish_reason=length`、`content_length=0`，同时 token usage显示大量 completion tokens，通常表示兼容 endpoint把生成预算消耗在 `reasoning_content`而没有产出可见 JSON。诊断文件会同时记录 `reasoning_length`；结构化 JSON任务应优先配置 `APP__MODEL__THINKING=disabled`，前提是供应商支持该参数。
+
 ## 测试与冒烟验证
 
 单元测试不要求已启动服务：
@@ -281,6 +316,7 @@ docker start cinecontext-postgres
 | production requires `model.mode=openai` | 移除错误的 `APP__MODEL__MODE`/`APP_ENVIRONMENT` override |
 | health 显示 provider disabled | 检查对应 token/key 名和双下划线；重启后配置才重新装配 |
 | DDG 有结果但正文为空 | 站点可能阻止、超限、非 HTML 或 DNS/URL 安全检查失败；系统可能降级为 snippet |
+| run 显示 `Diagnostic <id>` | 用 ID 搜索 `.runtime/logs/cinecontext.log` 获取 stack，再用同一 `run_id` 对照节点日志和 `tool_calls` |
 | 页面仍是旧前端 | 启动脚本会重建 dist；手工启动 Uvicorn 前先运行 `npm --prefix frontend run build` |
 | 端口占用 | 设置 `CINECONTEXT_PORT`；自动 PG 冲突则设置 `CINECONTEXT_DB_PORT` 或 `DATABASE_URL` |
 | run 重启后为 interrupted | 当前后台任务不持久化调度，这是预期行为；创建新 submission key 重跑 |

@@ -1,5 +1,4 @@
 from uuid import UUID
-
 from alcedo import ConflictError, NotFoundError, UnitOfWork, transactional
 from openai import APIConnectionError, APITimeoutError, AuthenticationError, RateLimitError
 

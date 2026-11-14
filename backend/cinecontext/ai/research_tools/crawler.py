@@ -1,5 +1,6 @@
 import asyncio
 import ipaddress
+import logging
 import socket
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
@@ -7,10 +8,12 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from ...settings import CrawlerOptions
+from ...observability import safe_url
 from ..types import PageContent, SearchResult
 
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _ACCEPTED_CONTENT_TYPES = {"text/html", "text/plain"}
+logger = logging.getLogger(__name__)
 
 
 class VisibleHTMLParser(HTMLParser):
@@ -71,6 +74,7 @@ async def validate_public_url(url: str, resolver=resolve_host) -> bool:
             return False
         return all(ipaddress.ip_address(address).is_global for address in addresses)
     except (OSError, ValueError, UnicodeError):
+        logger.debug("Crawler DNS validation failed hostname=%s", hostname)
         return False
 
 
@@ -94,6 +98,7 @@ class WebCrawler:
         current = url
         for redirect in range(self.options.max_redirects + 1):
             if not await validate_public_url(current, self.resolver):
+                logger.debug("Crawler skipped unsafe URL origin=%s", safe_url(current))
                 return None
             try:
                 async with self.http.stream(
@@ -106,23 +111,44 @@ class WebCrawler:
                     if response.status_code in _REDIRECT_STATUSES:
                         location = response.headers.get("location")
                         if not location or redirect == self.options.max_redirects:
+                            reason = "missing" if not location else "limit"
+                            logger.debug(
+                                "Crawler redirect skipped reason=%s origin=%s redirects=%d",
+                                reason, safe_url(current), redirect,
+                            )
                             return None
                         current = urljoin(str(response.url), location)
                         continue
                     if response.is_error:
+                        logger.debug(
+                            "Crawler HTTP status skipped status=%d origin=%s",
+                            response.status_code, safe_url(str(response.url)),
+                        )
                         return None
                     content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
                     if content_type not in _ACCEPTED_CONTENT_TYPES:
+                        logger.debug(
+                            "Crawler content type skipped content_type=%s origin=%s",
+                            content_type or "missing", safe_url(str(response.url)),
+                        )
                         return None
                     chunks = []
                     size = 0
                     async for chunk in response.aiter_bytes():
                         size += len(chunk)
                         if size > byte_limit:
+                            logger.debug(
+                                "Crawler byte limit exceeded bytes=%d limit=%d origin=%s",
+                                size, byte_limit, safe_url(str(response.url)),
+                            )
                             return None
                         chunks.append(chunk)
                     text = b"".join(chunks).decode(response.encoding or "utf-8", errors="replace")
                     return str(response.url), text
-            except httpx.HTTPError:
+            except httpx.HTTPError as error:
+                logger.debug(
+                    "Crawler HTTP exception error_type=%s origin=%s",
+                    type(error).__name__, safe_url(current),
+                )
                 return None
         return None

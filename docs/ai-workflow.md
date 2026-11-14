@@ -97,6 +97,8 @@ builder 丢弃重复 event ID、引用未发布 evidence、引用未选 film 的
 
 `WorkflowOperations.logged` 包装模型与工具动作，使用 monotonic clock 记录 operation、`ok/empty/failed`、elapsed milliseconds 和 detail。Operation 名集中在 `OperationName` enum。失败审计完成后重新抛出原异常。
 
+DEBUG级别会输出 workflow/node start、node completion、transition context以及成功 operation耗时；字段包括 `run_id`、state、outcome、next state、step和聚合计数。INFO默认只保留 curation/workflow终态，WARNING保留可降级错误和结构化输出重试。operation失败记录一次无stack ERROR并写入 `tool_calls.detail`；未处理异常最终只由 `CurationService` 用 `logger.exception`输出完整stack，避免模型、operation、node和facade重复打印同一堆栈。
+
 `optional` 只吞掉 `httpx.HTTPError`、`ValueError`、`KeyError`，为可降级外部工具添加 limitation；模型主路径或未列出的异常仍失败。`capture` 以 `(film_id, source_url, body)` 在内存去重，持久化后才把带数据库 UUID 的 `EvidenceRecord` 加入 context。
 
 每次 persistence 方法进入新的 Alcedo scope/UoW。不要把 HTTP/model await 移进 `@transactional` 方法，否则会扩大事务和锁的持续时间。
@@ -105,10 +107,13 @@ builder 丢弃重复 event ID、引用未发布 evidence、引用未选 film 的
 
 - Plan、核心 assess 或其他未处理错误：离开 runner，由 `CurationService` 写 `FAILED`。
 - Model timeout/rate limit/auth/connection：failure facade 转换为面向用户的稳定消息。
+- 模型返回不完整或不符合 schema 的 JSON：adapter记录schema、attempt、finish reason、content/reasoning长度；默认重新生成完整JSON一次，仍失败才终止run。原始响应只在显式开启本地诊断捕获时写入隔离目录。
 - TMDB、web、ratings 的指定可选错误：记录 limitation 后继续。
 - Timeline 模型 `APIError`/`ValueError`：保留 release timeline，添加 limitation 后继续。
 - Guide API error：不重试 validation cycle，进入 ratings 后 partial publish。
 - 进程退出：当前 background task 丢失；下次启动把 queued/running run 标记为 interrupted。
+
+未处理失败由 `CurationService` 生成 UUID diagnostic ID。文件日志以该 ID 关联唯一的完整stack；`run.error`保留友好消息并附diagnostic ID。默认还附加截断、脱敏后的异常类型和消息，可通过 `APP__LOGGING__INCLUDE_TECHNICAL_FAILURE_DETAIL=false`关闭。模型adapter正常日志只记录schema、model ID、API style、耗时和token usage；crawler URL只记录无userinfo/query/fragment的origin。任何层都不得记录prompt、检索query、evidence/模型输出body、headers或credentials。`CAPTURE_MODEL_RESPONSES`是临时本地诊断例外，使用后必须关闭并清理文件。
 
 ## 安全增加节点
 
