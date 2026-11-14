@@ -1,0 +1,36 @@
+database:
+  create_schema: false
+
+model:
+  mode: mock
+
+tools:
+  timeout_seconds: 15
+  tmdb:
+    api_base_url: https://api.themoviedb.org/3
+    web_base_url: https://www.themoviedb.org/movie
+    search_result_limit: 8
+    overview_length: 1000
+  brave:
+    endpoint: https://api.search.brave.com/res/v1/llm/context
+    query_length: 600
+    maximum_urls: 4
+    maximum_tokens: 2048
+    maximum_tokens_per_url: 512
+    snippets_per_url: 2
+    excerpt_length: 1400
+  duckduckgo:
+    enabled: true
+    endpoint: https://html.duckduckgo.com/html/
+    query_length: 600
+    result_limit: 4
+  crawler:
+    enabled: true
+    max_pages: 4
+    response_byte_limit: 1000000
+    excerpt_length: 1400
+    user_agent: CineContext/0.1 (+https://github.com/)
+    max_redirects: 3
+  omdb:
+    endpoint: https://www.omdbapi.com/
+    imdb_base_url: https://www.imdb.com/title

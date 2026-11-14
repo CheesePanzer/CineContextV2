@@ -1,0 +1,14 @@
+.runtime/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+frontend/dist/
+frontend/node_modules/
+*.egg-info/
+.DS_Store
+course_project.pdf
+output/
+tmp/
+.venv/
