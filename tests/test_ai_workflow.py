@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import httpx
 from alcedo import ConflictError, NotFoundError, Options
 from pydantic import BaseModel
+from starlette.testclient import TestClient
 from cinecontext.ai.curation import CurationService
 from cinecontext.ai.openai_model import ModelOutputValidationError, ModelResponse, OpenAIModel
 from cinecontext.ai.nodes import WorkflowOperations
@@ -47,6 +48,7 @@ from cinecontext.contracts import Claim, Constraints, FilmGuide, Guide, Timeline
 from cinecontext.domain import CurationRun, RunStatus
 from cinecontext.observability import configure_logging, sanitize_message
 from cinecontext.settings import LoggingOptions, ModelOptions, ToolsOptions
+from cinecontext.spa import SpaStaticFiles
 
 
 def context(state=CurationState.PLAN):
@@ -533,6 +535,31 @@ class StructuredModelOutputTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("hidden reasoning", content)
             finally:
                 await model.close()
+
+
+class SpaStaticFilesTests(unittest.TestCase):
+    def test_client_route_falls_back_to_index_but_missing_asset_stays_404(self):
+        from fastapi import FastAPI
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "index.html").write_text("<html>SPA shell</html>", encoding="utf-8")
+            (root / "asset.js").write_text("console.log('asset')", encoding="utf-8")
+            app = FastAPI()
+            app.mount("/", SpaStaticFiles(root))
+
+            with TestClient(app) as client:
+                route = client.get("/research/abc/progress", headers={"Accept": "text/html"})
+                asset = client.get("/asset.js")
+                missing_asset = client.get("/missing.js", headers={"Accept": "text/html"})
+                api_like = client.get("/api/missing", headers={"Accept": "application/json"})
+
+            self.assertEqual(route.status_code, 200)
+            self.assertIn("SPA shell", route.text)
+            self.assertEqual(asset.status_code, 200)
+            self.assertIn("console.log", asset.text)
+            self.assertEqual(missing_asset.status_code, 404)
+            self.assertEqual(api_like.status_code, 404)
 
 class FakeRunRepository:
     def __init__(self, run=None):

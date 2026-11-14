@@ -4,13 +4,13 @@ from pathlib import Path
 from typing import Callable
 
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 
 from alcedo import AlcedoRuntime, Configuration, Entity, configure_alcedo
 from .api import router
 from .infrastructure.services import add_cinecontext_services
 from .observability import configure_logging
 from .settings import LoggingOptions, ToolsOptions
+from .spa import SpaStaticFiles
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -62,5 +62,5 @@ def bootstrap_app(
 
     dist = ROOT / "frontend" / "dist"
     if serve_frontend and dist.is_dir():
-        app.mount("/", StaticFiles(directory=dist, html=True), name="frontend")
+        app.mount("/", SpaStaticFiles(directory=dist), name="frontend")
     return app
