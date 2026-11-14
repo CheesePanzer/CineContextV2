@@ -13,6 +13,7 @@ from ..application.ports import CurationPersistence
 from ..contracts import FilmAssessment, TimelineResearch
 from ..domain import RunStatus
 from ..observability import sanitize_message
+from .activity import joined_titles, shorten
 from .guide_validation import GuideValidator
 from .timeline import TimelineBuilder
 from .types import (
@@ -141,6 +142,9 @@ class PlanNode:
     async def run(self, ctx: WorkflowContext) -> WorkflowContext:
         await self.operations.advance(ctx, ProgressStage.PLANNING, "Defining the search terms and scope.")
         ctx.plan = await self.operations.logged(ctx, OperationName.MODEL_PLAN, lambda: ctx.model.plan(ctx.constraints))
+        message = (f"Prepared {len(ctx.plan.hints)} initial film leads for metadata verification."
+                   if ctx.plan.hints else "Prepared a topic-based source research plan.")
+        await self.operations.advance(ctx, ProgressStage.PLANNING, message)
         ctx.outcome = NodeOutcome.SUCCESS
         return ctx
 
@@ -158,6 +162,10 @@ class DiscoverNode:
             ctx.films.append(await self.operations.logged(
                 ctx, OperationName.LOOKUP_LOCAL_MOVIE, lambda film_id=film_id: ctx.tools.lookup_local_movie(film_id)
             ))
+        await self.operations.advance(
+            ctx, ProgressStage.SEARCHING,
+            f"Found {len(candidate_ids)} reusable film candidate{'s' if len(candidate_ids) != 1 else ''} in the local catalog."
+        )
         await self._metadata_candidates(ctx)
         for film in ctx.films:
             await self._film_evidence(ctx, film)
@@ -183,6 +191,10 @@ class DiscoverNode:
             if any(hint.title.casefold() in {film.original_title.casefold(), film.title.casefold()}
                    and (hint.year is None or film.year == hint.year) for film in ctx.films):
                 continue
+            await self.operations.advance(
+                ctx, ProgressStage.SEARCHING,
+                f"Checking film metadata for “{hint.title}”{f' ({hint.year})' if hint.year else ''}."
+            )
             film = await self.operations.optional(ctx, OperationName.LOOKUP_MOVIE, lambda hint=hint: ctx.tools.lookup_movie(hint))
             if film and all(item.id != film.id for item in ctx.films):
                 ctx.films.append(film)
@@ -201,6 +213,10 @@ class DiscoverNode:
             lambda: ctx.tools.search_passages(ctx.require_plan().query, film_id)
         )
         if not rows and ctx.tools.web_enabled:
+            await self.operations.advance(
+                ctx, ProgressStage.SEARCHING,
+                f"Stored sources were insufficient for “{film.title}”; searching public web sources."
+            )
             query = f"\"{film.original_title}\" {film.year} film synopsis historical setting"
             rows = await self.operations.optional(ctx, OperationName.SEARCH_WEB, lambda: ctx.tools.search_web(query, film_id))
         await self.operations.capture(ctx, rows or [])
@@ -221,6 +237,12 @@ class AssessNode:
         ctx.assessment_films = []
         if films:
             ctx.decisions.update(await self._assess(ctx, films))
+            for film in films:
+                decision = ctx.decisions[film.id]
+                await self.operations.advance(
+                    ctx, ProgressStage.ASSESSING,
+                    f"{film.title}: {decision.status.value.replace('_', ' ')} — {shorten(decision.reason)}"
+                )
         accepted = sum(item.status == DecisionStatus.ACCEPTED for item in ctx.decisions.values())
         ctx.pending_follow_up = None
         if accepted < ctx.constraints.count and len(ctx.seen_follow_up_queries) < MAX_FOLLOW_UP_QUERIES:
@@ -290,7 +312,13 @@ class FollowUpNode:
             lambda: search(query, film_id),
         )
         await self.operations.capture(ctx, rows or [])
-        ctx.assessment_films = [film] if len(ctx.evidence) > before else []
+        new_count = len(ctx.evidence) - before
+        await self.operations.advance(
+            ctx, ProgressStage.FOLLOW_UP,
+            (f"Found {new_count} additional source{'s' if new_count != 1 else ''} for “{film.title}”; re-evaluating the film."
+             if new_count else f"No additional evidence was found for “{film.title}”.")
+        )
+        ctx.assessment_films = [film] if new_count else []
         ctx.pending_follow_up = None
         ctx.outcome = NodeOutcome.SUCCESS
         return ctx
@@ -328,6 +356,11 @@ class SelectNode:
             {str(key): item.model_dump(mode="json") for key, item in ctx.decisions.items()},
             ctx.study.to_json(),
         )
+        if ctx.selected:
+            await self.operations.advance(
+                ctx, ProgressStage.ASSESSING,
+                f"Selected {len(ctx.selected)} film{'s' if len(ctx.selected) != 1 else ''}: {joined_titles(ctx.selected)}."
+            )
         if not ctx.selected:
             ctx.partial_message = "The available sources did not support any films meeting the criteria."
             ctx.outcome = NodeOutcome.PARTIAL
@@ -352,6 +385,10 @@ class TimelineNode:
         except (APIError, ValueError):
             ctx.limitations.append("The story or context timeline could not be validated.")
         timeline = self.builder.build(ctx.selected, research, {item.id for item in ctx.published_evidence})
+        await self.operations.advance(
+            ctx, ProgressStage.GENERATING,
+            f"Built validated timeline views for {', '.join(axis.value for axis in timeline.views)}."
+        )
         study = ctx.require_study()
         ctx.study = study.model_copy(update={"timeline": timeline})
         views = timeline.views_json()
@@ -371,6 +408,10 @@ class GuideNode:
     async def run(self, ctx: WorkflowContext) -> WorkflowContext:
         operation = OperationName.MODEL_GENERATE if ctx.guide_attempts == 0 else OperationName.MODEL_REVISE
         ctx.guide_attempts += 1
+        await self.operations.advance(
+            ctx, ProgressStage.GENERATING,
+            f"Writing guide draft {ctx.guide_attempts} of {MAX_GUIDE_ATTEMPTS} for {len(ctx.selected)} selected films."
+        )
         try:
             guide = await self.operations.logged(
                 ctx, operation,
@@ -379,10 +420,18 @@ class GuideNode:
                 ),
             )
             self.validator.validate(guide, ctx.selected, ctx.published_evidence)
+            await self.operations.advance(
+                ctx, ProgressStage.GENERATING,
+                "The guide passed film coverage and citation validation."
+            )
             ctx.guide = guide
             ctx.outcome = NodeOutcome.SUCCESS
         except (ValidationError, ValueError) as error:
             ctx.guide_correction = str(error)[:600]
+            await self.operations.advance(
+                ctx, ProgressStage.GENERATING,
+                "The guide draft did not pass structured citation validation; preparing a revision."
+            )
             ctx.outcome = NodeOutcome.RETRY if ctx.guide_attempts < MAX_GUIDE_ATTEMPTS else NodeOutcome.PARTIAL
         except APIError as error:
             detail = "The model service returned an error while writing the guide."
