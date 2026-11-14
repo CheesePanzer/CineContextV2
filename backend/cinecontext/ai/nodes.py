@@ -280,13 +280,13 @@ class AssessNode:
             item = ValidatedDecision.model_validate(
                 {**assessment.model_dump(), "evidence_ids": evidence_ids}
             )
-            if item.status == DecisionStatus.ACCEPTED and not any(
-                by_id[ref].film_id == film_id and by_id[ref].kind != EvidenceKind.METADATA
-                for ref in item.evidence_ids
-            ):
+            has_topic_evidence = any(
+                by_id[ref].kind != EvidenceKind.METADATA for ref in item.evidence_ids
+            )
+            if not has_topic_evidence:
                 item = item.model_copy(update={
                     "status": DecisionStatus.NEEDS_EVIDENCE,
-                    "reason": "The selection lacks a source that connects this film to the topic.",
+                    "next_query": f'"{film.original_title}" {film.year} film {ctx.constraints.theme}',
                 })
             result[film_id] = item
         return result

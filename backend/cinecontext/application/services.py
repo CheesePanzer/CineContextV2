@@ -5,7 +5,7 @@ from openai import APIConnectionError, APITimeoutError, AuthenticationError, Rat
 from ..contracts import Constraints, ParseRequest, RunRequest
 from ..ai.ports import ApplicationModelProvider
 from ..ai.types import EvidenceRecord, FilmProjection
-from ..ai.workflow import GuideRetrySnapshot
+from ..ai.resume import GuideRetrySnapshot
 from ..domain import CurationRun, RunStatus
 from ..domain.repositories import FilmRepository, RunRepository
 from .errors import ModelGatewayError, ModelGatewayTimeoutError

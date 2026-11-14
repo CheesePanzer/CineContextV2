@@ -14,6 +14,7 @@ from starlette.testclient import TestClient
 from cinecontext.ai.curation import CurationService
 from cinecontext.ai.openai_model import ModelOutputValidationError, ModelResponse, OpenAIModel
 from cinecontext.ai.nodes import WorkflowOperations
+from cinecontext.ai.nodes import AssessNode
 from cinecontext.application.services import RunApplicationService
 from cinecontext.ai.types import (
     DecisionStatus,
@@ -42,8 +43,8 @@ from cinecontext.ai.workflow import (
     WorkflowRunnerError,
     WorkflowTransition,
     WorkflowTransitionError,
-    GuideRetrySnapshot,
 )
+from cinecontext.ai.resume import GuideRetrySnapshot
 from cinecontext.contracts import Claim, Constraints, FilmGuide, Guide, TimelineResearch
 from cinecontext.domain import CurationRun, RunStatus
 from cinecontext.observability import configure_logging, sanitize_message
@@ -153,6 +154,62 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(ValueError, "does not belong"):
             GuideValidator().validate(guide, [film], [evidence])
+
+    async def test_assessment_accepts_cited_shared_non_metadata_evidence(self):
+        film = sample_film()
+        evidence = sample_evidence(None)
+        assessment = SimpleNamespace(decisions=[SimpleNamespace(
+            film_id=film.id,
+            evidence_ids=[evidence.id],
+            model_dump=lambda: {
+                "film_id": film.id,
+                "status": DecisionStatus.ACCEPTED,
+                "reason": "A shared source explicitly names the film and topic.",
+                "relevance": "primary",
+                "evidence_ids": [evidence.id],
+                "next_query": "",
+            },
+        )])
+
+        class Operations:
+            async def logged(self, ctx, operation, action):
+                return assessment
+
+        ctx = context(CurationState.ASSESS)
+        ctx.evidence = [evidence]
+        result = await AssessNode(Operations())._assess(ctx, [film])
+
+        self.assertEqual(result[film.id].status, DecisionStatus.ACCEPTED)
+
+    async def test_assessment_replaces_over_specific_follow_up_when_evidence_is_missing(self):
+        film = sample_film()
+        metadata = sample_evidence(film.id).model_copy(update={"kind": EvidenceKind.METADATA})
+        assessment = SimpleNamespace(decisions=[SimpleNamespace(
+            film_id=film.id,
+            evidence_ids=[metadata.id],
+            model_dump=lambda: {
+                "film_id": film.id,
+                "status": DecisionStatus.NEEDS_EVIDENCE,
+                "reason": "A non-metadata source is required.",
+                "relevance": "primary",
+                "evidence_ids": [metadata.id],
+                "next_query": "very restrictive scholarly institution query",
+            },
+        )])
+
+        class Operations:
+            async def logged(self, ctx, operation, action):
+                return assessment
+
+        ctx = context(CurationState.ASSESS)
+        ctx.constraints.theme = "state surveillance"
+        ctx.evidence = [metadata]
+        result = await AssessNode(Operations())._assess(ctx, [film])
+
+        self.assertEqual(
+            result[film.id].next_query,
+            f'"{film.original_title}" {film.year} film state surveillance',
+        )
 
     def test_transition_requires_exactly_one_match(self):
         ctx = context()

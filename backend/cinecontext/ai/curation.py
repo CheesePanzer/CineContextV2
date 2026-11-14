@@ -19,7 +19,8 @@ from ..settings import LoggingOptions, ToolsOptions
 from .nodes import create_guide_retry_workflow, create_workflow
 from .ports import ApplicationModelProvider
 from .research_tools import create_research_tools
-from .workflow import CurationState, GuideRetrySnapshot, WorkflowContext, WorkflowRunner
+from .resume import GuideRetrySnapshot
+from .workflow import CurationState, WorkflowContext, WorkflowRunner
 
 logger = logging.getLogger(__name__)
 
