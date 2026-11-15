@@ -41,7 +41,7 @@ ai adapters / external providers
 
 | 模式 | 组合根 | 注入差异 |
 |---|---|---|
-| production | [`cinecontext/main.py`](../backend/cinecontext/main.py) | `OpenAIModelProvider`，要求 `model.mode=openai` 和有效模型配置 |
+| production | [`cinecontext/main.py`](../backend/cinecontext/main.py) | `OpenAIModelProvider`，支持 `openai` 和 `tacc` 配置 |
 | mock | [`cinecontext/mock/main.py`](../backend/cinecontext/mock/main.py) | `MockModelProvider`、demo repository、启动时幂等 seed |
 
 共同的 [`bootstrap.py`](../backend/cinecontext/bootstrap.py) 创建 FastAPI，解析数据库 URL，调用 `configure_alcedo`，注册共同服务和 `/api` router，并在存在 `frontend/dist` 时把它挂载到 `/`。Alcedo 为每个 HTTP 请求创建 scope；后台 `CurationJob` 在原请求 scope 结束后再创建独立 scope。
@@ -81,7 +81,8 @@ context 是单次 run 的可变工作内存，包含约束、计划、候选、�
 
 - production 的 [`openai_model.py`](../backend/cinecontext/ai/openai_model.py) 使用 `AsyncOpenAI`，支持 `chat_completions` 与 `responses` 两种 API style，并将返回 JSON 校验为 contracts。
 - mock 的 [`mock/ai/model.py`](../backend/cinecontext/mock/ai/model.py) 生成确定性结果，用于演示和 smoke test。
-- provider 暴露 `mode`，健康检查和 run 数据据此区分 `openai`/`mock`。
+- TACC 通过 OpenAI-compatible HTTP 入口或 [`tacc_transport.py`](../backend/cinecontext/ai/tacc_transport.py) 调用课程模型。模型适配器把 TACC 作业未就绪转换成模型端口错误，由应用层映射为 HTTP 503。
+- provider 暴露 `mode`，健康检查和 run 数据据此区分 `openai`、`tacc` 和 `mock`。
 
 ## Research Tools Provider 架构
 
@@ -100,18 +101,21 @@ context 是单次 run 的可变工作内存，包含约束、计划、候选、�
 | [`local.py`](../backend/cinecontext/ai/research_tools/local.py) | 本地候选、电影 projection 和 PostgreSQL passage 搜索 |
 | [`tmdb.py`](../backend/cinecontext/ai/research_tools/tmdb.py) | TMDB 精确电影匹配、metadata 入库、TMDB audience rating |
 | [`brave.py`](../backend/cinecontext/ai/research_tools/brave.py) | Brave LLM Context excerpts |
+| [`wikipedia.py`](../backend/cinecontext/ai/research_tools/wikipedia.py) | Wikipedia 检索和来源摘录 |
 | [`duckduckgo.py`](../backend/cinecontext/ai/research_tools/duckduckgo.py) | DuckDuckGo HTML 结果解析；可抓正文，失败时保留 snippet |
 | [`crawler.py`](../backend/cinecontext/ai/research_tools/crawler.py) | 公网 URL/DNS 校验、重定向/大小/content-type 限制、可见文本提取 |
 | [`omdb.py`](../backend/cinecontext/ai/research_tools/omdb.py) | 按 IMDb ID 获取 IMDb/Rotten Tomatoes/Metacritic 快照 |
 | [`ratings.py`](../backend/cinecontext/ai/research_tools/ratings.py) | 为评分增加 provider/status/as_of 并统一持久化 |
 
-有 Brave key 时工厂只选择 Brave web provider；否则选择 DuckDuckGo + crawler。TMDB 和 OMDb 按各自凭据独立启用，不影响本地检索。
+有 Brave key 时工厂选择 Brave。TACC 默认配置随后选择 Wikipedia，其他配置默认选择 DuckDuckGo + crawler。TMDB 和 OMDb 按各自凭据独立启用。
 
 ## 事务与持久化边界
 
 Alcedo 的 `@transactional` 调用对象公开的 `uow.execute()`；同一 UoW 中的嵌套调用加入当前事务。HTTP 应用服务的创建、删除、启动清理是明确事务。
 
 长时间 AI run 使用另一种边界：singleton `ScopedCurationPersistence` 的每个方法新建 Alcedo scope，解析 scoped `CurationPersistenceService`，执行一次短操作后关闭 scope。写操作由 `@transactional` 包裹，读操作在短 scope 中完成。因此模型请求、TMDB/搜索/crawler/OMDb 请求不会持有数据库事务或行锁。
+
+影片延伸阅读的应用服务也使用短 scope。它在 scope 内通过 `RunApplicationService.get_film` 验证 run 与影片的关系并生成 DTO，关闭 scope 后再调用 `FilmReadings` 端口访问影评网站。
 
 典型序列是：外部调用 -> 审计短事务 -> 证据短事务 -> 下一外部调用。代价是整个研究不是一个原子事务；收益是长 I/O 不占用事务，且中间进度和证据可观察。异常由 `CurationService` 转换为 terminal `FAILED` 写入。
 

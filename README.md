@@ -21,8 +21,8 @@ CineContext 是一个有证据约束的电影研究与观影指南应用。用�
 | Web/API | FastAPI、Uvicorn |
 | 应用框架 | 仓库内置 Alcedo（DI、配置、UoW、错误映射） |
 | 数据 | PostgreSQL、SQLAlchemy Async、asyncpg、Alembic |
-| AI | OpenAI Python SDK，支持 OpenAI-compatible Chat Completions / Responses |
-| 外部研究 | TMDB、Brave LLM Context、DuckDuckGo HTML + crawler、OMDb |
+| AI | OpenAI Python SDK、课程 TACC Qwen、OpenAI-compatible Chat Completions / Responses |
+| 外部研究 | TMDB、Brave LLM Context、Wikipedia、DuckDuckGo HTML + crawler、OMDb |
 
 ## 5 分钟启动
 
@@ -54,7 +54,13 @@ CINECONTEXT_PYTHON="$PWD/.venv/bin/python" ./scripts/start.sh
 
 启动器会安装/校验依赖、执行 Alembic、运行 `npm ci`、构建 `frontend/dist`，再由 FastAPI 在 `http://127.0.0.1:8765` 提供 API 和静态前端。未设置 `DATABASE_URL` 时，它会在 `.runtime/` 初始化本机 PostgreSQL 实例。
 
-生产模式需要模型凭据，配置示例和所有变量见[部署文档](docs/deployment.md)：
+使用课程 TACC 时，可以用一条命令提交 Qwen 作业并启动应用。开发和部署配置见 [TACC 部署说明](docs/deployment.md#tacc-qwen)。
+
+```bash
+./scripts/start.sh --submit-tacc
+```
+
+使用其他 OpenAI-compatible 供应商时，按供应商要求提供凭据。
 
 ```bash
 CINECONTEXT_APP=production APP__MODEL__API_KEY='<key>' \

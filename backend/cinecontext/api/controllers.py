@@ -1,28 +1,64 @@
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Request
 
-from alcedo import Inject, ServiceScopeFactory
+from alcedo import ForbiddenError, Inject, ServiceScopeFactory
 from alcedo import Options
 from ..ai.ports import ApplicationModelProvider
-from ..application.services import ParseApplicationService, RunApplicationService
-from ..contracts import ParseRequest, RunRequest
+from ..ai.types import ModelMode
+from ..application.services import (
+    FilmReadingsApplicationService, ParseApplicationService, RunApplicationService, TaccJobApplicationService,
+)
+from ..contracts import ParseRequest, RunRequest, TaccSubmissionRequest
 from ..settings import ToolsOptions
 from ..infrastructure.persistence import CurationJob
 
 router = APIRouter()
 
 
+def is_local(request: Request) -> bool:
+    loopback = {"127.0.0.1", "::1"}
+    return bool(request.client and request.client.host in loopback
+                and request.url.hostname in loopback | {"localhost"})
+
+
 @router.get("/health")
 async def health(
+    request: Request,
     models: Inject[ApplicationModelProvider],
     tools: Inject[Options[ToolsOptions]],
 ):
-    return {"status": "ok", "model_mode": models.mode,
+    readiness = await models.readiness() if models.mode == ModelMode.TACC else None
+    job = None
+    if readiness and readiness.job_id:
+        job = {"id": readiness.job_id, "queued_seconds": readiness.queued_seconds,
+               "remaining_seconds": readiness.remaining_seconds}
+    return {"status": "ok", "model_mode": models.mode, "model_status": readiness.status if readiness else None,
+            "tacc_job": job,
+            "tacc_resubmit_enabled": bool(job and is_local(request)),
             "model_id": getattr(models, "model_id", None),
-            "web_enabled": tools.value.brave.enabled or tools.value.duckduckgo.enabled,
+            "web_enabled": tools.value.brave.enabled or tools.value.wikipedia_enabled or tools.value.duckduckgo.enabled,
             "metadata_enabled": tools.value.tmdb.enabled,
-            "ratings_enabled": tools.value.omdb.enabled}
+            "ratings_enabled": tools.value.tmdb.enabled or tools.value.omdb.enabled,
+            "tmdb_ratings_enabled": tools.value.tmdb.enabled,
+            "omdb_ratings_enabled": tools.value.omdb.enabled}
+
+
+@router.post("/tacc/jobs", status_code=202)
+async def submit_tacc_job(
+    body: TaccSubmissionRequest, request: Request, scope_factory: Inject[ServiceScopeFactory],
+    models: Inject[ApplicationModelProvider],
+):
+    if not is_local(request):
+        raise ForbiddenError("TACC jobs can be submitted from the local app.")
+    origin = request.headers.get("origin")
+    if origin and origin != str(request.base_url).rstrip("/"):
+        raise ForbiddenError("Submit the job from the CineContext page.")
+    if models.mode != ModelMode.TACC:
+        raise ForbiddenError("This instance does not manage TACC jobs.")
+    async with scope_factory.create_scope() as scope:
+        service = await scope.resolve(TaccJobApplicationService)
+        return await service.submit(body.previous_job_id, restart=body.restart)
 
 
 @router.get("/runs")
@@ -74,6 +110,11 @@ async def delete_run(run_id: UUID, service: Inject[RunApplicationService]):
 @router.get("/runs/{run_id}/films/{film_id}")
 async def get_film(run_id: UUID, film_id: UUID, service: Inject[RunApplicationService]):
     return await service.get_film(run_id, film_id)
+
+
+@router.get("/runs/{run_id}/films/{film_id}/readings")
+async def get_film_readings(run_id: UUID, film_id: UUID, service: Inject[FilmReadingsApplicationService]):
+    return await service.get(run_id, film_id)
 
 
 @router.get("/films/{film_id}/ratings")

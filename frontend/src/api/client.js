@@ -3,7 +3,7 @@ const API_ROOT = '/api';
 export async function request(path, options = {}) {
   let response;
   try {
-    const timeout = path === '/requests/parse' ? 200000 : 15000;
+    const timeout = path === '/requests/parse' ? 900000 : path === '/tacc/jobs' ? 330000 : 15000;
     response = await fetch(API_ROOT + path, {...options, signal: AbortSignal.timeout(timeout)});
   } catch (problem) {
     throw new Error(problem.name === 'TimeoutError'
@@ -32,7 +32,8 @@ export function post(path, body) {
 }
 
 export const api = {
-  health: () => request('/health'),
+  health: () => request('/health', {cache: 'no-store'}),
+  submitTacc: (previousJobId, restart = false) => post('/tacc/jobs', {previous_job_id: previousJobId, restart}),
   listRuns: () => request('/runs'),
   parseRequest: prompt => post('/requests/parse', {prompt}),
   createRun: (submissionKey, constraints) => post('/runs', {submission_key: submissionKey, constraints}),
@@ -40,5 +41,6 @@ export const api = {
   deleteRun: runId => request(`/runs/${runId}`, {method: 'DELETE'}),
   retryGuide: runId => post(`/runs/${runId}/retry-guide`, {}),
   getFilm: (runId, filmId) => request(`/runs/${runId}/films/${filmId}`),
+  getFilmReadings: (runId, filmId) => request(`/runs/${runId}/films/${filmId}/readings`),
   getRatings: filmId => request(`/films/${filmId}/ratings`),
 };

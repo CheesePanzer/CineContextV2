@@ -12,3 +12,5 @@ course_project.pdf
 output/
 tmp/
 .venv/
+/deploy/tacc/configurations/
+/deploy/tacc/run.sh

@@ -1,6 +1,7 @@
 from alcedo import OptionsBase
 from enum import StrEnum
-from pydantic import BaseModel, Field, model_validator
+from urllib.parse import urlsplit
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .ai.types import ModelApiStyle, ModelMode, ThinkingMode
 
@@ -30,6 +31,8 @@ class ModelOptions(OptionsBase):
     base_url: str | None = None
     api_key: str | None = None
     model_id: str | None = None
+    tacc_job_id: str | None = Field(default=None, pattern=r"^[0-9]+$")
+    tcloud_bin: str = "tcloud"
     timeout_seconds: float = Field(default=60, gt=0)
     max_retries: int = Field(default=1, ge=0)
     max_tokens: int | None = Field(default=None, gt=0)
@@ -39,8 +42,26 @@ class ModelOptions(OptionsBase):
     prompt_cache: bool = False
     structured_output_retries: int = Field(default=1, ge=0, le=3)
 
+    @field_validator("tacc_job_id", mode="before")
+    @classmethod
+    def normalize_job_id(cls, value):
+        return str(value) if type(value) is int else value
+
     @model_validator(mode="after")
     def validate_credentials(self):
+        if self.mode == ModelMode.TACC:
+            if self.api_style != ModelApiStyle.CHAT_COMPLETIONS:
+                raise ValueError("TACC requires chat_completions")
+            if self.tacc_job_id and self.base_url:
+                raise ValueError("Set either model.tacc_job_id or model.base_url")
+            if not self.tacc_job_id:
+                endpoint = urlsplit(self.base_url or "")
+                if endpoint.scheme not in {"http", "https"} or not endpoint.hostname or endpoint.path.rstrip("/") != "/v1":
+                    raise ValueError("TACC requires a job ID or an HTTP base URL ending in /v1")
+            self.model_id = self.model_id or "qwen3.8-27b"
+            return self
+        if self.tacc_job_id:
+            raise ValueError("model.tacc_job_id requires model.mode=tacc")
         missing = [name for name in ("api_key", "model_id") if not getattr(self, name)]
         if missing:
             raise ValueError(f"model configuration requires {', '.join(missing)}")
@@ -102,6 +123,7 @@ class OmdbOptions(BaseModel):
 
 class ToolsOptions(OptionsBase):
     timeout_seconds: float = Field(default=15, gt=0)
+    wikipedia_enabled: bool = False
     tmdb: TmdbOptions = Field(default_factory=TmdbOptions)
     brave: BraveOptions = Field(default_factory=BraveOptions)
     duckduckgo: DuckDuckGoOptions = Field(default_factory=DuckDuckGoOptions)

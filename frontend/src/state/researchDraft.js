@@ -1,12 +1,15 @@
 export const RESEARCH_DRAFT_KEY = 'cinecontext.research-draft.v1';
-export const EMPTY_DRAFT = {prompt: '', constraints: null, clarification: ''};
+export const EMPTY_DRAFT = {
+  prompt: '', constraints: null, clarification: '', referenceMatch: null,
+  preliminaryAnalysis: '', suggestedThemes: [], suggestedStyles: [],
+};
 
 export function loadDraft() {
   try {
     const value = JSON.parse(sessionStorage.getItem(RESEARCH_DRAFT_KEY));
-    return value && typeof value.prompt === 'string'
-      ? {...EMPTY_DRAFT, ...value}
-      : {...EMPTY_DRAFT};
+    if (!value || typeof value.prompt !== 'string') return {...EMPTY_DRAFT};
+    if (!Object.hasOwn(value, 'referenceMatch')) return {...EMPTY_DRAFT, prompt: value.prompt};
+    return {...EMPTY_DRAFT, ...value};
   } catch {
     return {...EMPTY_DRAFT};
   }

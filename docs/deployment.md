@@ -115,6 +115,41 @@ APP__MODEL__MODEL_ID='<model-id>' \
 ./scripts/start.sh
 ```
 
+## TACC Qwen
+
+完成课程 `tcloud` 账号配置后，可以用 `./scripts/start.sh --submit-tacc` 提交新作业并启动本地应用。该命令记录作业编号、提交时间和时限。使用 TACC 配置时，`./scripts/start.sh` 优先读取显式配置的连接，否则恢复上次提交的作业。`./scripts/start.sh JOB_ID` 可以指定已有作业。
+
+```bash
+(cd deploy/tacc && tcloud submit)
+tcloud ps -j JOB_ID
+tcloud cat slurm_log/cinecontext-qwen-JOB_ID.log
+./scripts/start.sh JOB_ID
+```
+
+GPU 作业申请两张卡，最长运行一小时。网页会显示排队、加载和就绪状态，日志出现 `CINECONTEXT_QWEN_READY` 后即可提交研究。同一个作业可以处理多条请求。演示结束后可执行 `tcloud cancel -j JOB_ID`。下次启动模型后，使用新的作业编号。
+
+网页约每 15 秒查询一次状态。排队时显示从提交起已等待多久。分到 GPU 后，剩余时间按申请时限减去 Slurm 报告的运行时长计算，包含模型加载时间。手动提交且没有本地提交记录的作业只显示状态。
+
+若 `tcloud ps -j JOB_ID` 显示 `PD (Resources)`，作业还在等 GPU。若作业刚启动就退出，检查 Slurm 日志里的显存检查结果。遇到明确的显存不足时，可以在提交配置的 `job.general` 加上 `exclude=NODE_NAME`，再提交并使用新编号。
+
+在本机网页中，作业结束后可以从左侧点击 **Request TACC GPUs**。申请成功后页面会跟踪新作业，重新启动服务也会读取新编号。本机 `.env` 可用 `CINECONTEXT_TACC_EXCLUDE_NODES` 为此按钮设置逗号分隔的节点排除列表。
+
+作业仍在排队、加载或运行时，可以点击 **Restart · 1 hour** 提前更换作业。确认后，后端取消当前作业，确认停止后提交新的申请。正在处理的模型请求会被中断，新作业需要重新排队和加载 Qwen。重复点击同一旧作业只会得到同一个新作业编号。取消无法确认时，刷新状态后再试。
+
+PowerShell 或固定本机配置时，在 `.env` 设置以下字段，再运行正常的启动脚本。
+
+```dotenv
+CINECONTEXT_APP=production
+APP_ENVIRONMENT=tacc
+APP__MODEL__TACC_JOB_ID=12345
+APP__MODEL__TCLOUD_BIN=tcloud
+APP__TOOLS__TMDB__ACCESS_TOKEN=
+```
+
+`TCLOUD_BIN` 可填 SDK 的绝对路径。FastAPI 通过 SDK 在提交账号的个人目录交换请求文件，vLLM 在 GPU 作业内监听本地端口。若后端可访问课程的 HTTP 入口，可以用以 `/v1` 结尾的 `APP__MODEL__BASE_URL` 替换作业编号，并按入口要求配置密钥。TACC 配置默认使用 Wikipedia 检索，已配置的 Brave 服务优先。TACC 使用数据库中已有的馆藏。需要加载项目自带的演示资料时，在演示数据库上先运行 mock 入口。与旧版同时运行时，可为 V2 设置网页端口 `8766` 和 PostgreSQL 端口 `55439`。
+
+只有运行 FastAPI 的机器需要配置 SDK。若组员各自在自己的机器运行 FastAPI，需要使用各自有权限的 TACC 账户和作业。通过同一个已部署的 FastAPI 页面访问时，浏览器端沿用该后端的模型连接。
+
 ## DeepSeek / OpenAI-compatible 示例
 
 Chat Completions 风格的 DeepSeek 示例（model ID 应以供应商当前账号可用值为准）：
@@ -144,7 +179,7 @@ APP__MODEL__THINKING=disabled
 2. 若设置 `APP_ENVIRONMENT=<name>`，同目录同 stem 的 `appsettings.<name>.yaml`（存在时）。
 3. `APP__...` 环境变量，双下划线表示嵌套 key。
 
-数据库 URL 在共同 bootstrap 中的优先级是显式 `create_app(database_url=...)` 参数、`DATABASE_URL`、合并后的 `database.url`。脚本通过环境变量提供它。`CINECONTEXT_APP` 只选择组合根，不是 `APP__MODEL__MODE` 的别名；mock 组合根会强制 model mode 为 `mock`，production 要求 mode 为 `openai`。
+数据库 URL 在共同 bootstrap 中的优先级是显式 `create_app(database_url=...)` 参数、`DATABASE_URL`、合并后的 `database.url`。脚本通过环境变量提供它。`CINECONTEXT_APP` 选择组合根。mock 组合根使用 `mock`，production 支持 `openai` 和 `tacc`。
 
 ## 全部相关环境变量
 
@@ -158,18 +193,20 @@ APP__MODEL__THINKING=disabled
 | `CINECONTEXT_DB_PORT` | `55438`；仅自动本地 PostgreSQL 使用 |
 | `DATABASE_URL` | SQLAlchemy async URL；缺失时脚本自动准备本机 PostgreSQL |
 | `CINECONTEXT_TEST_URL` | smoke test 的服务根地址，默认 `http://127.0.0.1:8765` |
-| `APP_ENVIRONMENT` | 可选 appsettings 环境后缀；仓库未提供通用 production override 文件 |
+| `APP_ENVIRONMENT` | 可选 appsettings 环境后缀，课程模型使用 `tacc` |
 
 ### 模型 `APP__MODEL__*`
 
 | 变量 | 默认值/约束 |
 |---|---|
-| `APP__MODEL__MODE` | production 文件为 `openai`；通常不要手工修改 |
+| `APP__MODEL__MODE` | production 默认 `openai`，TACC 配置文件使用 `tacc` |
 | `APP__MODEL__API_STYLE` | `chat_completions`；或 `responses` |
 | `APP__MODEL__BASE_URL` | 可选 OpenAI-compatible base URL |
-| `APP__MODEL__API_KEY` | production 必填 |
-| `APP__MODEL__MODEL_ID` | production 必填 |
-| `APP__MODEL__TIMEOUT_SECONDS` | `60`，必须大于 0 |
+| `APP__MODEL__API_KEY` | `openai` 模式必填，TACC HTTP 入口按课程配置填写 |
+| `APP__MODEL__MODEL_ID` | `openai` 模式必填，TACC 默认 `qwen3.8-27b` |
+| `APP__MODEL__TACC_JOB_ID` | SDK 方式使用的课程作业编号 |
+| `APP__MODEL__TCLOUD_BIN` | 默认 `tcloud`，可填可执行文件的绝对路径 |
+| `APP__MODEL__TIMEOUT_SECONDS` | 默认 `60`，TACC 配置为 `420` |
 | `APP__MODEL__MAX_RETRIES` | `1`，OpenAI SDK retry 次数，至少 0 |
 | `APP__MODEL__MAX_TOKENS` | 可选正整数；chat 路径使用 |
 | `APP__MODEL__TEMPERATURE` | 可选，0 到 2；chat 路径使用 |
@@ -217,7 +254,7 @@ APP__MODEL__THINKING=disabled
 - 无 Brave key：使用 DuckDuckGo 的无 JavaScript HTML endpoint；默认最多 4 个结果并抓取最多 4 个公开 HTML/text 页面。
 - crawler 拒绝非 HTTP(S)、带 userinfo、localhost、非公网 DNS 地址和不支持的 content type，逐跳验证重定向并执行字节上限。
 - 页面抓取失败但搜索 snippet 存在时，snippet 仍可作为 `search_summary` evidence。
-- 有 Brave key：Brave provider 优先，DDG/crawler 不作为 Brave 请求失败后的自动 fallback。
+- 有 Brave key 时使用 Brave。否则 TACC 配置使用 Wikipedia，默认配置使用 DuckDuckGo 和 crawler。
 - TMDB access token 独立启用电影 metadata、海报路径和 TMDB audience score。
 - OMDb key 独立启用 IMDb ID 对应的 IMDb/Rotten Tomatoes/Metacritic 快照。
 
@@ -229,7 +266,7 @@ APP__MODEL__THINKING=disabled
 curl http://127.0.0.1:8765/api/health
 ```
 
-响应包含 `status`、`model_mode`、`model_id`、`web_enabled`、`metadata_enabled`、`ratings_enabled`。它报告已装配配置，不会主动探测每个外部 provider，也不是数据库深度检查。
+响应包含 `status`、`model_mode`、`model_id`、`model_status`、`web_enabled`、`metadata_enabled`、`ratings_enabled`。`model_status` 在 TACC 模式下报告作业是否就绪。工具字段报告配置状态。
 
 ## 日志与故障关联
 
@@ -313,7 +350,7 @@ docker start cinecontext-postgres
 | asyncpg 密码认证/URL 解析失败 | 检查 role/database 权限，并 percent-encode 用户名和密码组件 |
 | Alembic 找不到配置/模块 | 使用 editable install；从 `backend` 运行，或从根目录加 `-c backend/alembic.ini` |
 | production 启动时报 model credentials | 设置非空 `APP__MODEL__API_KEY` 和 `APP__MODEL__MODEL_ID`；确认 `.env` 没覆盖 shell 值 |
-| production requires `model.mode=openai` | 移除错误的 `APP__MODEL__MODE`/`APP_ENVIRONMENT` override |
+| production requires `model.mode=openai or tacc` | 检查 `APP__MODEL__MODE` 和 `APP_ENVIRONMENT` |
 | health 显示 provider disabled | 检查对应 token/key 名和双下划线；重启后配置才重新装配 |
 | DDG 有结果但正文为空 | 站点可能阻止、超限、非 HTML 或 DNS/URL 安全检查失败；系统可能降级为 snippet |
 | run 显示 `Diagnostic <id>` | 用 ID 搜索 `.runtime/logs/cinecontext.log` 获取 stack，再用同一 `run_id` 对照节点日志和 `tool_calls` |

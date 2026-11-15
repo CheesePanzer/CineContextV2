@@ -1,8 +1,8 @@
 import React, {useState} from 'react';
 import {useNavigate, useOutletContext} from 'react-router-dom';
 import {api} from '../api/client.js';
+import {TACC_STATUS_NAMES, TACC_WAITING_STATES} from '../app/constants.js';
 import {loadDraft, saveDraft} from '../state/researchDraft.js';
-import {MODEL_NAME} from '../app/constants.js';
 
 const EXAMPLES = [
   ['Norse mythology', 'Find five films inspired by Norse mythology and show how they relate to the mythological timeline.'],
@@ -17,6 +17,7 @@ export default function NewResearchPage() {
   const [error, setError] = useState('');
   const {health} = useOutletContext();
   const navigate = useNavigate();
+  const waitingForModel = TACC_WAITING_STATES.has(health?.model_status);
 
   function updatePrompt(value) {
     setPrompt(value);
@@ -25,13 +26,15 @@ export default function NewResearchPage() {
 
   async function analyze(event) {
     event.preventDefault();
-    if (busy || !prompt.trim()) return;
+    if (busy || waitingForModel || !prompt.trim()) return;
     setBusy(true);
     setError('');
     saveDraft({prompt, constraints: null, clarification: ''});
     try {
       const parsed = await api.parseRequest(prompt);
-      saveDraft({prompt, constraints: parsed.constraints, clarification: parsed.clarification});
+      saveDraft({prompt, constraints: parsed.constraints, clarification: parsed.clarification,
+        referenceMatch: parsed.reference_match ?? null, preliminaryAnalysis: parsed.preliminary_analysis,
+        suggestedThemes: parsed.suggested_themes, suggestedStyles: parsed.suggested_styles});
       navigate('/research/criteria');
     } catch (problem) { setError(problem.message); }
     finally { setBusy(false); }
@@ -45,7 +48,7 @@ export default function NewResearchPage() {
     <div className="new-intro">
       <span className="eyebrow">Film, history, and myth</span>
       <h1>What should we explore?</h1>
-      <p>Ask a research question. CineContext will define the criteria before it searches, evaluates, and builds a sourced viewing guide.</p>
+      <p>Ask a research question. If it refers to a named work, CineContext can look up its setting before you review the criteria.</p>
     </div>
     <form className="composer-wrap" onSubmit={analyze}>
       <div className="prompt-examples" aria-label="Example research questions">
@@ -56,12 +59,13 @@ export default function NewResearchPage() {
         <textarea id="research-prompt" value={prompt} onChange={event => updatePrompt(event.target.value)} onKeyDown={onKeyDown}
           placeholder="Which films can help me understand…" rows="5" required maxLength="500" disabled={busy} autoFocus />
         <div className="composer-actions">
-          <span><i className="provider-dot" />{MODEL_NAME}</span>
+          <span><i className="provider-dot" />{health?.model_mode === 'mock' ? 'Local demo' : health?.model_id || 'Model'}</span>
           <span className="keyboard-hint">Ctrl/⌘ + Enter</span>
-          <button className="primary-button" type="submit" disabled={busy || !prompt.trim()}>{busy ? 'Analyzing…' : 'Analyze question'} <b aria-hidden="true">→</b></button>
+          <button className="primary-button" type="submit" disabled={busy || waitingForModel || !prompt.trim()}>{busy ? 'Analyzing…' : 'Analyze question'} <b aria-hidden="true">→</b></button>
         </div>
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
+      {waitingForModel && <p className="capability-note" role="status">{TACC_STATUS_NAMES[health.model_status]}.</p>}
       {health && (!health.metadata_enabled || !health.web_enabled) && <p className="capability-note">
         {!health.metadata_enabled && 'Film metadata is unavailable. '}{!health.web_enabled && 'Web search is unavailable.'}
       </p>}

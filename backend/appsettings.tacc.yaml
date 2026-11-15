@@ -1,0 +1,10 @@
+model:
+  mode: tacc
+  model_id: qwen3.8-27b
+  timeout_seconds: 420
+  max_retries: 0
+  temperature: 0.2
+  thinking: disabled
+
+tools:
+  wikipedia_enabled: true

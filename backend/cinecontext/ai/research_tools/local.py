@@ -1,7 +1,12 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from uuid import UUID
 
-from ...application.ports import CurationPersistence
 from ..types import EvidenceDraft, FilmProjection
+
+if TYPE_CHECKING:
+    from ...application.ports import CurationPersistence
 
 
 class LocalResearchProvider:

@@ -1,7 +1,9 @@
 import asyncio
 import json
 import logging
+import re
 from collections import defaultdict
+from itertools import zip_longest
 from time import monotonic
 from uuid import UUID
 
@@ -15,7 +17,8 @@ from ..domain import RunStatus
 from ..observability import sanitize_message
 from .activity import joined_titles, shorten
 from .guide_validation import GuideValidator
-from .timeline import TimelineBuilder
+from .ports import ModelUnavailableError
+from .timeline import TimelineBuilder, calendar_years
 from .types import (
     DecisionStatus,
     EvidenceDraft,
@@ -29,6 +32,7 @@ from .types import (
     StudyPayload,
     ToolCallStatus,
     ValidatedDecision,
+    film_title_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,12 +84,13 @@ class WorkflowOperations:
     async def optional(self, ctx, operation, action):
         try:
             return await self.logged(ctx, operation, action)
-        except (httpx.HTTPError, ValueError, KeyError) as error:
+        except (httpx.HTTPError, TimeoutError, ValueError, KeyError) as error:
             logger.warning(
                 "Optional operation degraded error_type=%s error_message=%s",
                 type(error).__name__, sanitize_message(error), extra=self._context(ctx, operation),
             )
             notice = {
+                OperationName.DISCOVER_CATALOG: "TMDB keyword discovery was unavailable.",
                 OperationName.LOOKUP_MOVIE: "TMDB metadata could not be verified for some candidates.",
                 OperationName.LOOKUP_RATINGS: "External ratings are unavailable for some films.",
             }.get(operation, "Some external sources are unavailable.")
@@ -142,9 +147,7 @@ class PlanNode:
     async def run(self, ctx: WorkflowContext) -> WorkflowContext:
         await self.operations.advance(ctx, ProgressStage.PLANNING, "Defining the search terms and scope.")
         ctx.plan = await self.operations.logged(ctx, OperationName.MODEL_PLAN, lambda: ctx.model.plan(ctx.constraints))
-        message = (f"Prepared {len(ctx.plan.hints)} initial film leads for metadata verification."
-                   if ctx.plan.hints else "Prepared a topic-based source research plan.")
-        await self.operations.advance(ctx, ProgressStage.PLANNING, message)
+        await self.operations.advance(ctx, ProgressStage.PLANNING, "Prepared the search plan and backup film leads.")
         ctx.outcome = NodeOutcome.SUCCESS
         return ctx
 
@@ -166,7 +169,10 @@ class DiscoverNode:
             ctx, ProgressStage.SEARCHING,
             f"Found {len(candidate_ids)} reusable film candidate{'s' if len(candidate_ids) != 1 else ''} in the local catalog."
         )
-        await self._metadata_candidates(ctx)
+        if ctx.tools.metadata_enabled:
+            local_overflow = ctx.films[6:]
+            del ctx.films[6:]
+            await self._metadata_candidates(ctx, local_overflow)
         for film in ctx.films:
             await self._film_evidence(ctx, film)
         context = await self.operations.logged(
@@ -182,13 +188,34 @@ class DiscoverNode:
         ctx.outcome = NodeOutcome.SUCCESS
         return ctx
 
-    async def _metadata_candidates(self, ctx):
-        if not ctx.tools.metadata_enabled:
-            return
-        for hint in ctx.require_plan().hints:
+    async def _metadata_candidates(self, ctx, local_overflow):
+        plan = ctx.require_plan()
+        editorial = await self.operations.logged(
+            ctx, OperationName.DISCOVER_EDITORIAL,
+            lambda: ctx.tools.discover_editorial(ctx.constraints, plan.discovery_terms),
+        )
+        if editorial:
+            await self.operations.advance(ctx, ProgressStage.SEARCHING,
+                                          f"Found {len(editorial)} film leads in editorial sources.")
+        async def search_catalog():
+            return await asyncio.wait_for(ctx.tools.discover_catalog(plan.discovery_terms, ctx.constraints), timeout=18)
+
+        catalog = await self.operations.optional(ctx, OperationName.DISCOVER_CATALOG, search_catalog) or []
+        if catalog:
+            await self.operations.advance(ctx, ProgressStage.SEARCHING,
+                                          f"Found {len(catalog)} film leads through TMDB keywords.")
+        leads = (hint for batch in zip_longest(editorial, catalog, plan.hints)
+                 for hint in batch if hint is not None)
+        checked = set()
+        for hint in leads:
             if len(ctx.films) >= 10:
                 break
-            if any(hint.title.casefold() in {film.original_title.casefold(), film.title.casefold()}
+            title_key = film_title_key(hint.title)
+            key = (title_key, hint.year)
+            if key in checked:
+                continue
+            checked.add(key)
+            if any(title_key in {film_title_key(film.original_title), film_title_key(film.title)}
                    and (hint.year is None or film.year == hint.year) for film in ctx.films):
                 continue
             await self.operations.advance(
@@ -196,8 +223,27 @@ class DiscoverNode:
                 f"Checking film metadata for “{hint.title}”{f' ({hint.year})' if hint.year else ''}."
             )
             film = await self.operations.optional(ctx, OperationName.LOOKUP_MOVIE, lambda hint=hint: ctx.tools.lookup_movie(hint))
-            if film and all(item.id != film.id for item in ctx.films):
+            if film and not any(self._same_film(film, item) for item in ctx.films):
                 ctx.films.append(film)
+        for film in local_overflow:
+            if len(ctx.films) >= 10:
+                break
+            if not any(self._same_film(film, item) for item in ctx.films):
+                ctx.films.append(film)
+
+    @staticmethod
+    def _same_film(left, right):
+        for key in ("id", "tmdb_id", "imdb_id"):
+            value = getattr(left, key)
+            if value and value == getattr(right, key):
+                return True
+        if left.year != right.year:
+            return False
+        if left.director and right.director and film_title_key(left.director) != film_title_key(right.director):
+            return False
+        left_titles = {film_title_key(left.title), film_title_key(left.original_title)} - {""}
+        right_titles = {film_title_key(right.title), film_title_key(right.original_title)}
+        return bool(left_titles & right_titles)
 
     async def _film_evidence(self, ctx, film):
         film_id = film.id
@@ -212,14 +258,18 @@ class DiscoverNode:
             ctx, OperationName.SEARCH_PASSAGES,
             lambda: ctx.tools.search_passages(ctx.require_plan().query, film_id)
         )
-        if not rows and ctx.tools.web_enabled:
+        external = await self.operations.logged(
+            ctx, OperationName.SEARCH_EDITORIAL,
+            lambda: ctx.tools.search_editorial(film),
+        ) if ctx.tools.metadata_enabled else []
+        if not rows and not external and ctx.tools.web_enabled:
             await self.operations.advance(
                 ctx, ProgressStage.SEARCHING,
                 f"Stored sources were insufficient for “{film.title}”; searching public web sources."
             )
             query = f"\"{film.original_title}\" {film.year} film synopsis historical setting"
             rows = await self.operations.optional(ctx, OperationName.SEARCH_WEB, lambda: ctx.tools.search_web(query, film_id))
-        await self.operations.capture(ctx, rows or [])
+        await self.operations.capture(ctx, [*(rows or []), *external])
 
 
 class AssessNode:
@@ -257,14 +307,25 @@ class AssessNode:
         return ctx
 
     async def _assess(self, ctx, films):
+        film_ids = {film.id for film in films}
+        evidence = [source for source in ctx.evidence if source.film_id is None or source.film_id in film_ids]
         raw = await self.operations.logged(
-            ctx, OperationName.MODEL_ASSESS, lambda: ctx.model.assess(ctx.constraints, films, ctx.evidence)
+            ctx, OperationName.MODEL_ASSESS, lambda: ctx.model.assess(ctx.constraints, films, evidence)
         )
         by_id = {item.id: item for item in ctx.evidence}
         decisions = defaultdict(list)
         for decision in raw.decisions:
             decisions[decision.film_id].append(decision)
         result = {}
+        setting = ctx.constraints.story_period
+        years = calendar_years(setting)
+        exact_year = next(iter(years), None) if (
+            len(years) == 1
+            and not re.search(
+                r"\b(?:circa|around|about|before|after|century)\b|\bc\.\s*\d|\d{4}s\b|\d\s*[-–—/]\s*\d",
+                setting, re.I,
+            )
+        ) else None
         for film in films:
             film_id = film.id
             items = decisions[film_id]
@@ -288,6 +349,21 @@ class AssessNode:
                     "status": DecisionStatus.NEEDS_EVIDENCE,
                     "next_query": f'"{film.original_title}" {film.year} film {ctx.constraints.theme}',
                 })
+            if item.status == DecisionStatus.ACCEPTED and exact_year is not None:
+                quote = " ".join(assessment.setting_quote.casefold().split())
+                if exact_year not in calendar_years(quote) or not any(
+                    by_id[ref].film_id == film_id and by_id[ref].kind != EvidenceKind.METADATA
+                    and quote in " ".join(by_id[ref].body.casefold().split())
+                    for ref in evidence_ids
+                ):
+                    if ctx.constraints.setting_match == "strict":
+                        item = item.model_copy(update={
+                            "status": DecisionStatus.NEEDS_EVIDENCE,
+                            "reason": f"The cited sources do not establish a story setting in {exact_year}.",
+                            "next_query": assessment.next_query or f'"{film.title}" {film.year} film story set in {exact_year}',
+                        })
+                    else:
+                        item = item.model_copy(update={"relevance": Relevance.SECONDARY})
             result[film_id] = item
         return result
 
@@ -312,6 +388,12 @@ class FollowUpNode:
             lambda: search(query, film_id),
         )
         await self.operations.capture(ctx, rows or [])
+        if ctx.tools.web_enabled:
+            context_rows = await self.operations.optional(
+                ctx, OperationName.SEARCH_WEB_CONTEXT,
+                lambda: ctx.tools.search_web(query),
+            )
+            await self.operations.capture(ctx, context_rows or [])
         new_count = len(ctx.evidence) - before
         await self.operations.advance(
             ctx, ProgressStage.FOLLOW_UP,
@@ -330,7 +412,10 @@ class SelectNode:
 
     async def run(self, ctx: WorkflowContext) -> WorkflowContext:
         matches = [film for film in ctx.films if ctx.decisions[film.id].status == DecisionStatus.ACCEPTED]
-        matches.sort(key=lambda film: ctx.decisions[film.id].relevance == Relevance.SECONDARY)
+        matches.sort(key=lambda film: (
+            ctx.decisions[film.id].relevance == Relevance.SECONDARY,
+            -ctx.decisions[film.id].preference_fit,
+        ))
         ctx.selected = matches[:ctx.constraints.count]
         selected_ids = {film.id for film in ctx.selected}
         ctx.published_evidence = [
@@ -338,7 +423,7 @@ class SelectNode:
         ]
         if len(ctx.selected) < ctx.constraints.count:
             ctx.limitations.append(
-                f"Requested {ctx.constraints.count} films. Found sufficient evidence for {len(ctx.selected)}."
+                f"Requested {ctx.constraints.count} films. Verified {len(ctx.selected)} against the confirmed criteria."
             )
         if not ctx.films:
             ctx.limitations.append("No candidates were found. Try an example question or enable external film tools.")
@@ -382,9 +467,9 @@ class TimelineNode:
                 ctx, OperationName.MODEL_TIMELINE,
                 lambda: ctx.model.timeline(ctx.constraints, ctx.selected, ctx.published_evidence)
             )
-        except (APIError, ValueError):
+        except (APIError, ModelUnavailableError, ValueError):
             ctx.limitations.append("The story or context timeline could not be validated.")
-        timeline = self.builder.build(ctx.selected, research, {item.id for item in ctx.published_evidence})
+        timeline = self.builder.build(ctx.selected, research, ctx.published_evidence)
         await self.operations.advance(
             ctx, ProgressStage.GENERATING,
             f"Built validated timeline views for {', '.join(axis.value for axis in timeline.views)}."
@@ -412,14 +497,16 @@ class GuideNode:
             ctx, ProgressStage.GENERATING,
             f"Writing guide draft {ctx.guide_attempts} of {MAX_GUIDE_ATTEMPTS} for {len(ctx.selected)} selected films."
         )
-        try:
-            guide = await self.operations.logged(
-                ctx, operation,
-                lambda: ctx.model.generate(
-                    ctx.constraints, ctx.selected, ctx.published_evidence, ctx.guide_correction
-                ),
+
+        async def generate_validated_guide():
+            guide = await ctx.model.generate(
+                ctx.constraints, ctx.selected, ctx.published_evidence, ctx.guide_correction
             )
             self.validator.validate(guide, ctx.selected, ctx.published_evidence)
+            return guide
+
+        try:
+            guide = await self.operations.logged(ctx, operation, generate_validated_guide)
             await self.operations.advance(
                 ctx, ProgressStage.GENERATING,
                 "The guide passed film coverage and citation validation."
@@ -427,15 +514,21 @@ class GuideNode:
             ctx.guide = guide
             ctx.outcome = NodeOutcome.SUCCESS
         except (ValidationError, ValueError) as error:
-            ctx.guide_correction = str(error)[:600]
+            ctx.guide_correction = sanitize_message(error, 600)
+            logger.warning("Guide draft rejected: %s", ctx.guide_correction,
+                           extra=self.operations._context(ctx, operation))
+            can_retry = ctx.guide_attempts < MAX_GUIDE_ATTEMPTS
             await self.operations.advance(
                 ctx, ProgressStage.GENERATING,
-                "The guide draft did not pass structured citation validation; preparing a revision."
+                "Revising the guide to fix a format or citation error." if can_retry
+                else "The revised guide could not be verified. The selected films and sources were saved."
             )
-            ctx.outcome = NodeOutcome.RETRY if ctx.guide_attempts < MAX_GUIDE_ATTEMPTS else NodeOutcome.PARTIAL
-        except APIError as error:
+            ctx.outcome = NodeOutcome.RETRY if can_retry else NodeOutcome.PARTIAL
+        except (APIError, ModelUnavailableError) as error:
             detail = "The model service returned an error while writing the guide."
-            if isinstance(error, APITimeoutError):
+            if isinstance(error, ModelUnavailableError):
+                detail = str(error)
+            elif isinstance(error, APITimeoutError):
                 detail = "The model timed out while writing the guide."
             elif isinstance(error, RateLimitError):
                 detail = "The model service was rate limited while writing the guide."
@@ -449,6 +542,10 @@ class RatingsNode:
         self.operations = operations
 
     async def run(self, ctx: WorkflowContext) -> WorkflowContext:
+        if ctx.tools.metadata_enabled:
+            await asyncio.gather(*(self.operations.optional(
+                ctx, OperationName.LOOKUP_MOVIE, lambda film=film: ctx.tools.enrich_local_movie(film)
+            ) for film in ctx.selected if not film.tmdb_id and not film.poster_path))
         if ctx.tools.ratings_enabled:
             await asyncio.gather(*(self.operations.optional(
                 ctx, OperationName.LOOKUP_RATINGS, lambda film=film: ctx.tools.lookup_ratings(film)

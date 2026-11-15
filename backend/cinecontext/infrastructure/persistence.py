@@ -69,9 +69,12 @@ class SqlAlchemyFilmRepository(SqlAlchemyRepository[Film]):
     entity_type = Film
 
     async def find_candidates(self, theme: str, limit: int = 10):
+        if not theme.strip():
+            return []
+        tag = Film.facts["theme"].astext
         statement = (
             select(Film.id)
-            .where(Film.facts["theme"].astext == theme)
+            .where(func.to_tsvector("simple", theme).op("@@")(func.plainto_tsquery("simple", tag)))
             .order_by(Film.created_at, Film.id)
             .limit(limit)
         )
@@ -80,7 +83,7 @@ class SqlAlchemyFilmRepository(SqlAlchemyRepository[Film]):
     async def get_projection(self, film_id: UUID):
         film = await self.get(film_id)
         releases = list((await self.session.scalars(
-            select(FilmRelease).where(FilmRelease.film_id == film_id).order_by(FilmRelease.year)
+            select(FilmRelease).where(FilmRelease.film_id == film_id).order_by(FilmRelease.year, FilmRelease.label)
         )).all())
         if not film or not releases:
             return None
@@ -113,9 +116,14 @@ class SqlAlchemyFilmRepository(SqlAlchemyRepository[Film]):
         ).order_by(RatingSnapshot.origin)
         return (await self.session.scalars(statement)).all()
 
+    async def save_poster(self, film_id: UUID, poster_path: str) -> None:
+        film = await self.session.scalar(select(Film).where(Film.id == film_id).with_for_update())
+        if film and film.facts.get("poster_path") != poster_path:
+            film.facts = {**film.facts, "poster_path": poster_path}
+
     async def save_tmdb_film(
         self, tmdb_id: int, imdb_id: str | None, title: str, original_title: str,
-        facts: dict[str, Any], release: str, source_url: str,
+        facts: dict[str, Any], release: str, source_url: str, kind: str = "tmdb_release",
     ) -> UUID:
         statement = insert(Film).values(
             slug=f"tmdb-{tmdb_id}", title=title, original_title=original_title,
@@ -129,13 +137,23 @@ class SqlAlchemyFilmRepository(SqlAlchemyRepository[Film]):
             if existing is None:
                 raise RuntimeError("TMDB film conflict did not return the existing film.")
             poster_path = facts.get("poster_path")
-            if poster_path and existing.facts.get("poster_path") != poster_path:
-                existing.facts = {**existing.facts, "poster_path": poster_path}
-            return existing.id
-        self.session.add(FilmRelease(
+            updated_facts = dict(existing.facts)
+            if poster_path:
+                updated_facts["poster_path"] = poster_path
+            if kind == "premiere":
+                updated_facts["year"] = min(updated_facts.get("year", facts["year"]), facts["year"])
+            if updated_facts != existing.facts:
+                existing.facts = updated_facts
+            film_id = existing.id
+            if kind != "premiere":
+                return film_id
+        statement = insert(FilmRelease).values(
             film_id=film_id, label=release, year=facts["year"], region="",
-            kind="tmdb_release", source_url=source_url,
-        ))
+            kind=kind, source_url=source_url,
+        ).on_conflict_do_nothing(index_elements=[
+            FilmRelease.film_id, FilmRelease.label, FilmRelease.region, FilmRelease.kind,
+        ])
+        await self.session.execute(statement)
         return film_id
 
     async def save_ratings(self, film_id: UUID, ratings: Sequence[dict[str, Any]]) -> None:
@@ -159,9 +177,13 @@ class SqlAlchemyResearchRepository(SqlAlchemyRepository[Source]):
             statement = statement.join(FilmPassage).where(FilmPassage.film_id == film_id)
         else:
             statement = statement.where(Passage.kind != "film")
-        statement = statement.where(Passage.search_vector.op("@@")(terms))
-        statement = statement.order_by(func.ts_rank(Passage.search_vector, terms).desc(), Passage.id).limit(limit)
-        return list((await self.session.execute(statement)).all())
+        ranked = statement.where(Passage.search_vector.op("@@")(terms)).order_by(
+            func.ts_rank(Passage.search_vector, terms).desc(), Passage.id,
+        )
+        rows = list((await self.session.execute(ranked.limit(limit))).all())
+        if not rows and film_id and query:
+            rows = list((await self.session.execute(statement.order_by(Passage.id).limit(limit))).all())
+        return rows
 
     def add_tool_call(self, run_id, operation, status, elapsed_ms, detail):
         self.session.add(ToolCall(run_id=run_id, operation=operation, status=status,
@@ -254,12 +276,17 @@ class ScopedCurationPersistence(CurationPersistence):
             service = await scope.resolve(CurationPersistenceService)
             return await service.get_film_projection(film_id)
 
-    async def save_tmdb_film(self, tmdb_id, imdb_id, title, original_title, facts, release, source_url):
+    async def save_tmdb_film(self, tmdb_id, imdb_id, title, original_title, facts, release, source_url, kind="tmdb_release"):
         async with self.scope_factory.create_scope() as scope:
             service = await scope.resolve(CurationPersistenceService)
             return await service.save_tmdb_film(
-                tmdb_id, imdb_id, title, original_title, facts, release, source_url
+                tmdb_id, imdb_id, title, original_title, facts, release, source_url, kind
             )
+
+    async def save_film_poster(self, film_id, poster_path):
+        async with self.scope_factory.create_scope() as scope:
+            service = await scope.resolve(CurationPersistenceService)
+            await service.save_film_poster(film_id, poster_path)
 
     async def search_passages(self, query, film_id=None, limit=5):
         async with self.scope_factory.create_scope() as scope:
@@ -334,10 +361,14 @@ class CurationPersistenceService:
         return film
 
     @transactional
-    async def save_tmdb_film(self, tmdb_id, imdb_id, title, original_title, facts, release, source_url):
+    async def save_tmdb_film(self, tmdb_id, imdb_id, title, original_title, facts, release, source_url, kind="tmdb_release"):
         return await self.films.save_tmdb_film(
-            tmdb_id, imdb_id, title, original_title, facts, release, source_url
+            tmdb_id, imdb_id, title, original_title, facts, release, source_url, kind
         )
+
+    @transactional
+    async def save_film_poster(self, film_id, poster_path):
+        await self.films.save_poster(film_id, poster_path)
 
     async def search_passages(self, query, film_id=None, limit=5):
         rows = await self.research.search_passages(query, film_id, limit)

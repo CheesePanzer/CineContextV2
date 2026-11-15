@@ -22,7 +22,8 @@ npm --prefix frontend run dev
 
 | 方法 | 路径 | 行为 |
 |---|---|---|
-| GET | `/api/health` | 返回 mode 与 provider enabled 状态 |
+| GET | `/api/health` | 返回 mode、provider enabled 状态、TACC 作业与排队/剩余时长 |
+| POST | `/api/tacc/jobs` | 本地同源提交 TACC 作业；`restart: true` 先确认旧作业结束再提交 |
 | POST | `/api/requests/parse` | 自然语言 prompt 转 constraints |
 | POST | `/api/runs` | 幂等创建 run，返回 202，并在新建时调度后台任务 |
 | GET | `/api/runs` | 最近 20 个 run |
@@ -30,11 +31,16 @@ npm --prefix frontend run dev
 | DELETE | `/api/runs/{run_id}` | 删除 terminal run 及其 run-owned 数据 |
 | POST | `/api/runs/{run_id}/retry-guide` | 使用已保存电影和证据，仅重跑 guide生成与发布 |
 | GET | `/api/runs/{run_id}/films/{film_id}` | 入选片目、对应 guide 与证据 |
+| GET | `/api/runs/{run_id}/films/{film_id}/readings` | 确认影片属于该 run，释放数据库会话后查询延伸阅读 |
 | GET | `/api/films/{film_id}/ratings` | 电影评分快照 |
 
 `POST /api/runs` 的 `submission_key` 是幂等键。相同 key + 相同 constraints 返回已有 run；相同 key + 不同 constraints 返回 409 conflict。
 
 Guide重跑只允许 `partial`、`failed`、`interrupted` 且 `study_result`中已有 selected films/evidence的run。事务认领会将run改回 `running/generating`并清除旧guide/error；后台任务只执行 `GUIDE -> PUBLISH/PUBLISH_PARTIAL`，不会重跑搜索、评估、timeline或ratings。
+
+重试输入使用 `ai/resume.py` 中的 `GuideRetrySnapshot`。应用服务不从 `ai/workflow.py` 导入该类型。
+
+`POST /api/tacc/jobs` 接受 `previous_job_id` 与可选的 `restart`。单进程内并发请求共享提交任务；旧 job ID 的重复请求返回当前 job ID。取消或提交无法确认时返回错误，前端保留手动刷新入口。该接口限制本地访问，并检查浏览器请求的 Origin。前端继续使用轮询，不使用 SSE。
 
 近期的 DELETE 约束是重要并发不变量：仅 `completed`、`partial`、`failed`、`interrupted` 可删除。repository 先 `SELECT ... FOR UPDATE`，active 的 `queued`/`running` 返回 409 `An active research run cannot be deleted.`，不存在返回 404。因为初始 schema 无级联删除，repository 只按顺序删除该 run 的 timeline links/events、tool calls、evidence、decisions 和 run；共享 film/source/passage/rating 保留。
 

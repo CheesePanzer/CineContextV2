@@ -15,6 +15,11 @@ THEMES = {
     SURVEILLANCE: ("监控", "监听", "surveillance", "stasi"),
     MEMORY: ("政治记忆", "罗马尼亚革命", "romanian revolution", "齐奥塞斯库", "political memory", "ceausescu", "ceaus"),
 }
+RESEARCH_TITLES = {
+    NORSE: "Norse Mythology on Film",
+    SURVEILLANCE: "State Surveillance on Film",
+    MEMORY: "Romanian Political Memory on Film",
+}
 REGIONS = {
     "欧洲": {"DK", "GB", "SE", "NO", "DE", "RO", "BE"},
     "北欧": {"DK", "SE", "NO"},
@@ -69,10 +74,14 @@ class MockModel:
         if not theme:
             clarification = "Demo mode covers Norse mythology, state surveillance, and Romanian political memory."
         return ParsedRequest.model_validate({
-            "constraints": {"topic": prompt, "theme": theme, "count": count, "region": region,
+            "constraints": {"topic": prompt, "theme": theme, "research_title": RESEARCH_TITLES.get(theme, ""),
+                            "count": count, "region": region,
                             "release_from": start, "release_to": end, "story_period": story_period, "axis": axis},
             "clarification": clarification,
         })
+
+    async def resolve_reference(self, prompt, sources):
+        return None
 
     async def plan(self, constraints):
         return Plan(query=constraints.theme or constraints.topic[:250])
@@ -175,6 +184,9 @@ class MockModel:
 
 class MockModelProvider:
     mode = ModelMode.MOCK
+
+    async def readiness(self) -> None:
+        return None
     model_id = None
 
     def create(self) -> MockModel:

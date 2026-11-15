@@ -1,27 +1,35 @@
+from __future__ import annotations
+
 from collections.abc import Sequence
 import logging
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 import httpx
 
-from ...application.ports import CurationPersistence
-from ...contracts import FilmHint, Rating
+from ...contracts import Constraints, FilmHint, Rating
 from ...settings import ToolsOptions
 from ..types import EvidenceDraft, FilmProjection
 from .brave import BraveSearchProvider
 from .crawler import WebCrawler, resolve_host
 from .duckduckgo import DuckDuckGoSearchProvider
+from .editorial import curated_candidates, curated_evidence
 from .local import LocalResearchProvider
 from .omdb import OmdbRatingsProvider
 from .ratings import RatingStore
 from .tmdb import TmdbMetadataProvider
+from .wikipedia import WikipediaSearchProvider
+
+if TYPE_CHECKING:
+    from ...application.ports import CurationPersistence
 
 logger = logging.getLogger(__name__)
 
 
 class FilmMetadataProvider(Protocol):
+    async def discover(self, terms: list[str], constraints: Constraints) -> list[FilmHint]: ...
     async def lookup_movie(self, hint: FilmHint) -> FilmProjection | None: ...
+    async def enrich_local_movie(self, film: FilmProjection) -> None: ...
 
 
 class WebSearchProvider(Protocol):
@@ -45,8 +53,12 @@ class ResearchTools(Protocol):
     def ratings_enabled(self) -> bool: ...
 
     async def find_candidates(self, theme: str) -> Sequence[UUID]: ...
+    async def discover_catalog(self, terms: list[str], constraints: Constraints) -> list[FilmHint]: ...
+    async def discover_editorial(self, constraints: Constraints, terms: list[str]) -> list[FilmHint]: ...
+    async def search_editorial(self, film: FilmProjection) -> list[EvidenceDraft]: ...
     async def lookup_local_movie(self, film_id: UUID) -> FilmProjection: ...
     async def lookup_movie(self, hint: FilmHint) -> FilmProjection | None: ...
+    async def enrich_local_movie(self, film: FilmProjection) -> None: ...
     async def search_passages(
         self, query: str, film_id: UUID | None = None
     ) -> list[EvidenceDraft]: ...
@@ -77,7 +89,7 @@ class ResearchToolsFacade:
 
     @property
     def web_enabled(self) -> bool:
-        return self.options.brave.enabled or self.options.duckduckgo.enabled
+        return self.options.brave.enabled or self.options.wikipedia_enabled or self.options.duckduckgo.enabled
 
     @property
     def ratings_enabled(self) -> bool:
@@ -89,8 +101,20 @@ class ResearchToolsFacade:
     async def lookup_local_movie(self, film_id: UUID):
         return await self.local.lookup_movie(film_id)
 
+    async def discover_catalog(self, terms: list[str], constraints: Constraints) -> list[FilmHint]:
+        return await self.metadata.discover(terms, constraints)
+
+    async def discover_editorial(self, constraints: Constraints, terms: list[str]) -> list[FilmHint]:
+        return curated_candidates(constraints, terms)
+
+    async def search_editorial(self, film: FilmProjection) -> list[EvidenceDraft]:
+        return curated_evidence(film)
+
     async def lookup_movie(self, hint: FilmHint):
         return await self.metadata.lookup_movie(hint)
+
+    async def enrich_local_movie(self, film: FilmProjection) -> None:
+        await self.metadata.enrich_local_movie(film)
 
     async def search_passages(self, query: str, film_id: UUID | None = None):
         return await self.local.search_passages(query, film_id)
@@ -115,6 +139,9 @@ def create_research_tools(
     if options.brave.enabled:
         web = BraveSearchProvider(http, options.brave)
         web_name = "brave"
+    elif options.wikipedia_enabled:
+        web = WikipediaSearchProvider(http, local)
+        web_name = "wikipedia"
     else:
         crawler = WebCrawler(http, options.crawler, resolver)
         web = DuckDuckGoSearchProvider(options.duckduckgo, options.crawler, crawler)

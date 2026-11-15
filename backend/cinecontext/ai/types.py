@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+from unicodedata import combining, normalize
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -9,6 +10,15 @@ from pydantic import BaseModel, ConfigDict, Field
 class ModelMode(StrEnum):
     OPENAI = "openai"
     MOCK = "mock"
+    TACC = "tacc"
+
+
+@dataclass(frozen=True)
+class ModelReadiness:
+    status: str
+    job_id: str | None = None
+    queued_seconds: int | None = None
+    remaining_seconds: int | None = None
 
 
 class ModelApiStyle(StrEnum):
@@ -76,6 +86,9 @@ class ProgressStage(StrEnum):
 class OperationName(StrEnum):
     MODEL_PLAN = "model.plan"
     FIND_CANDIDATES = "find_candidates"
+    DISCOVER_CATALOG = "discover_catalog"
+    DISCOVER_EDITORIAL = "discover_editorial"
+    SEARCH_EDITORIAL = "search_editorial"
     LOOKUP_LOCAL_MOVIE = "lookup_local_movie"
     LOOKUP_MOVIE = "lookup_movie"
     SEARCH_PASSAGES = "search_passages"
@@ -127,6 +140,11 @@ class FilmReleaseProjection(BaseModel):
     source_url: str
 
 
+def film_title_key(value: str) -> str:
+    return "".join(character for character in normalize("NFKD", value.strip().casefold())
+                   if not combining(character))
+
+
 class FilmProjection(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -136,6 +154,7 @@ class FilmProjection(BaseModel):
     original_title: str
     tmdb_id: int | None = None
     imdb_id: str | None = None
+    poster_path: str | None = None
     year: int
     countries: list[str] = Field(default_factory=list)
     director: str = ""
@@ -169,6 +188,7 @@ class ValidatedDecision(BaseModel):
     status: DecisionStatus
     reason: str
     relevance: Relevance = Relevance.PRIMARY
+    preference_fit: int = Field(default=0, ge=0, le=2)
     evidence_ids: list[UUID] = Field(default_factory=list)
     next_query: str = ""
 

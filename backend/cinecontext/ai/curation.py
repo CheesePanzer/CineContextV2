@@ -17,7 +17,7 @@ from ..domain import RunStatus
 from ..observability import sanitize_message
 from ..settings import LoggingOptions, ToolsOptions
 from .nodes import create_guide_retry_workflow, create_workflow
-from .ports import ApplicationModelProvider
+from .ports import ApplicationModelProvider, ModelUnavailableError
 from .research_tools import create_research_tools
 from .resume import GuideRetrySnapshot
 from .workflow import CurationState, WorkflowContext, WorkflowRunner
@@ -79,6 +79,8 @@ class CurationService:
                 message = "Model authentication failed. Check the server API key."
             elif isinstance(error, APIConnectionError):
                 message = "Cannot reach the model service. Try again shortly."
+            elif isinstance(error, ModelUnavailableError):
+                message = str(error)
             diagnostic = f"Diagnostic {diagnostic_id}"
             if self.logging_options.include_technical_failure_detail:
                 diagnostic += f": {type(error).__name__}: {sanitize_message(error)}"
