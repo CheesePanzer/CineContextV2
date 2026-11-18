@@ -154,7 +154,7 @@ MARVEL_READINGS = (
     curated("Avengers: Endgame", 2019, "BFI / Sight and Sound",
             "Avengers: Endgame review: the finale these heroes deserve",
             "https://www.bfi.org.uk/sight-and-sound/reviews/avengers-endgame-review-finale-these-heroes-deserve",
-            "Newman finds that the sprawling ensemble still makes room for small character moments and gives long-running arcs a satisfying conclusion.",
+            "Newman praises the finale’s character moments and closure. He notes that several returning characters and cameos assume viewers remember earlier films.",
             "Kim Newman"),
 )
 READINGS = MIDDLE_AGES + NORSE + ROMANIAN_POLITICAL_CINEMA + PACIFIC_WAR_READINGS + MARVEL_READINGS + (

@@ -344,9 +344,14 @@ class OpenAIModel:
         evidence = [item for item in evidence if item.film_id is None or item.film_id in film_numbers]
         draft = await self.complete(AssessmentDraft,
             "Evaluate every candidate once against all requested criteria using the supplied metadata and sources. "
+            "Judge each film on its merits. A later step applies the requested count, so accept every suitable "
+            "candidate and do not reject a film just because enough others qualify. "
             "Use the integer film number in each decision and cite integer source numbers in its sources list. "
             "Use only sources for that film or shared sources where film is null. "
             "Use the submitted form fields as the controlling criteria if they conflict with the original topic. "
+            "For beginners to a series, favor accessible origin stories, standalone entries, and early milestones. "
+            "A finale that assumes substantial prior viewing is a secondary match for a beginner's request, "
+            "even when it is an important milestone. Consider a direct predecessor on its own merits. "
             "For explicit genre and style preferences, set preference_fit to 2 for clear source support for the "
             "main preferences, 1 for partial support, or 0 for weak or unknown support or no preferences. "
             "Treat 'I like' and 'I prefer' as ranking preferences. A well-sourced core-topic match can be accepted "
@@ -420,6 +425,8 @@ class OpenAIModel:
             "that best addresses the user's main interest. Compare films with the reference work without implying "
             "that either inspired the other unless the sources say so. Explain how each film relates and note any documented differences "
             "in period or region. Distinguish fictional settings, film depictions, and historical facts. "
+            "For a franchise starter guide, put a selected prerequisite before its sequel. Mention a major missing "
+            "prerequisite only when the sources support it, without revealing plot outcomes. "
             "Explain which confirmed genre or style preferences the selections meet if the evidence supports it. "
             "Use only claims directly supported by the sources, favoring research institutions and archives for historical facts. "
             "Use only dates stated in a cited source, and call out a nearby setting as such. "
