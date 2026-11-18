@@ -102,7 +102,62 @@ ROMANIAN_POLITICAL_CINEMA = (
             "https://iffr.com/en/iffr/2007/films/the-paper-will-be-blue",
             "The festival describes Muntean’s realistic reconstruction of a night in the 1989 Romanian Revolution, when soldiers receive orders over television."),
 )
-READINGS = MIDDLE_AGES + NORSE + ROMANIAN_POLITICAL_CINEMA + (
+PACIFIC_WAR_READINGS = (
+    curated("The Thin Red Line", 1998, "Criterion", "The Thin Red Line: This Side of Paradise",
+            "https://www.criterion.com/current/posts/1603-the-thin-red-line-this-side-of-paradise",
+            "Sterritt looks at how Malick combines the soldiers’ voice-overs with images of the natural world, creating a war film whose questions outlast its battles.",
+            "David Sterritt"),
+    curated("The Thin Red Line", 1998, "Senses of Cinema", "The Shape of Fear: Thoughts after The Thin Red Line",
+            "https://www.sensesofcinema.com/2000/terrence-malick/thinredline/",
+            "Schaffer considers how shifts in point of view and the movement of the soldiers up the hill convey fear as both an individual and a collective experience.",
+            "Bill Schaffer"),
+    curated("The Thin Red Line", 1998, "BFI", "10 great films of 1998",
+            "https://www.bfi.org.uk/lists/10-great-films-1998",
+            "Baughan argues that the performances and the visceral depiction of Guadalcanal give Malick’s contemplative, impressionistic war film its coherence.",
+            "Nikki Baughan"),
+    curated("Hacksaw Ridge", 2016, "BFI", "10 great court-martial dramas",
+            "https://www.bfi.org.uk/lists/10-great-court-martial-dramas",
+            "Barnard highlights Desmond Doss’s refusal to carry a weapon and the film’s abrupt shift from courtroom melodrama to graphic combat.",
+            "Tom Barnard"),
+    curated("Midway", 1976, "RogerEbert.com", "Midway (1976)",
+            "https://www.rogerebert.com/reviews/midway-1976",
+            "Ebert finds the strategy scenes clear but argues that the use of archival footage and the emphasis on spectacle make the battle difficult to follow.",
+            "Roger Ebert"),
+    curated("Midway", 2019, "RogerEbert.com", "Midway (2019)",
+            "https://www.rogerebert.com/reviews/midway-movie-review-2019",
+            "Henderson praises the sound mix and finds the Pearl Harbor sequence effective, but criticizes the thin characters and repetitive combat scenes.",
+            "Odie Henderson"),
+)
+BFI_MCU_GUIDE = "https://www.bfi.org.uk/features/where-begin-marvel-cinematic-universe"
+MARVEL_READINGS = (
+    curated("Iron Man", 2008, "BFI", "Where to begin with the Marvel Cinematic Universe",
+            BFI_MCU_GUIDE,
+            "O’Callaghan recommends starting with Tony Stark’s origin story, highlighting Downey’s performance and the brisk opening that introduces the character.",
+            "Paul O’Callaghan"),
+    curated("Captain America: The First Avenger", 2011, "BFI",
+            "Where to begin with the Marvel Cinematic Universe", BFI_MCU_GUIDE,
+            "The guide offers Steve Rogers’s wartime origin as an alternative starting point and examines how the film uses his history as a propaganda figure.",
+            "Paul O’Callaghan"),
+    curated("The Avengers", 2012, "BFI", "Where to begin with the Marvel Cinematic Universe",
+            BFI_MCU_GUIDE,
+            "O’Callaghan treats the first ensemble film as a test of whether viewers enjoy the series, and suggests watching a couple of origin stories before it.",
+            "Paul O’Callaghan"),
+    curated("Guardians of the Galaxy", 2014, "BFI",
+            "Where to begin with the Marvel Cinematic Universe", BFI_MCU_GUIDE,
+            "The guide singles out James Gunn’s space adventure as a self-contained introduction to the MCU’s comic and cosmic side.",
+            "Paul O’Callaghan"),
+    curated("Avengers: Infinity War", 2018, "BFI / Sight and Sound",
+            "Avengers: Infinity War review: Marvel’s space mosaic punches for the stars",
+            "https://www.bfi.org.uk/sight-and-sound/reviews/avengers-infinity-war-review-marvels-space-mosaic-punches-stars",
+            "Newman explores how the film ties multiple series together through the quest for the Infinity Stones and singles out the humor between unlikely allies.",
+            "Kim Newman"),
+    curated("Avengers: Endgame", 2019, "BFI / Sight and Sound",
+            "Avengers: Endgame review: the finale these heroes deserve",
+            "https://www.bfi.org.uk/sight-and-sound/reviews/avengers-endgame-review-finale-these-heroes-deserve",
+            "Newman finds that the sprawling ensemble still makes room for small character moments and gives long-running arcs a satisfying conclusion.",
+            "Kim Newman"),
+)
+READINGS = MIDDLE_AGES + NORSE + ROMANIAN_POLITICAL_CINEMA + PACIFIC_WAR_READINGS + MARVEL_READINGS + (
     curated("Jan Žižka", 1956, "Czech National Film Archive",
             "Jan Žižka", "https://nfa.cz/cs/25486-jan-zizka",
             "Vávra’s film follows the Hussite movement after the death of Wenceslaus IV, with Žižka cast as a leader of the popular revolt."),
@@ -130,6 +185,8 @@ def curated_candidates(constraints: Constraints, terms: list[str]) -> list[FilmH
         contains_term(query, term) for term in ("surveillance", "revolution", "political memory", "communism")
     ):
         rows += ROMANIAN_POLITICAL_CINEMA
+    if any(contains_term(query, term) for term in ("marvel cinematic universe", "mcu", "marvel")):
+        rows += MARVEL_READINGS
     hints = {}
     for row in rows:
         if constraints.release_from and row.year < constraints.release_from:

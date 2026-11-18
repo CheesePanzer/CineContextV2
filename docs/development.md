@@ -1,113 +1,80 @@
-# 开发指南与 API
+# Development and API Guide
 
-## 本地开发约定
+## Local development
 
-- 从仓库根目录创建 `.venv`，以 editable 模式安装 `backend`；测试才能直接 import `cinecontext` 和 vendored `alcedo`。
-- 应用代码使用公开 `alcedo` 框架 exports，例如 `from alcedo import UnitOfWork, transactional`。公开项见 [`backend/alcedo/__init__.py`](../backend/alcedo/__init__.py)。框架项目链接见 [https://github.com/CheesePanzer/AlcedoButPython](https://github.com/CheesePanzer/AlcedoButPython)。`alcedo` 框架提供实现DDD的相关工具，框架设计上有借鉴 Asp.NET Core的相关功能。涉及`alcedo`底层的修改必须要求人工审查确认。
-- API controller 保持薄：请求解析、DI 和 HTTP shape 留在 `api/`，用例/事务在 `application/`，数据库细节在 `infrastructure/`。
-- 新外部服务通过 Protocol + adapter + composition root 接入，不直接从 domain 调 SDK。
-- 新状态、evidence kind、operation name 等稳定值优先使用 `StrEnum`，同时为 JSON value 补回归测试。
+Install `backend` in editable mode from the project environment. This makes both `cinecontext` and the vendored `alcedo` package available to the tests. Use public framework exports such as `from alcedo import UnitOfWork, transactional`. The public interface is declared in [alcedo/__init__.py](../backend/alcedo/__init__.py). [AlcedoButPython](https://github.com/CheesePanzer/AlcedoButPython) is the upstream DDD framework and takes cues from ASP.NET Core. Ask for human review when modifying the framework itself.
 
-前端开发服务器可独立启动：
+Keep HTTP parsing, dependency injection, and response mapping in `api/`. Put use cases and transaction boundaries in `application/` and database implementation details in `infrastructure/`. Integrate external services through a protocol, adapter, and composition root. Use `StrEnum` for new persisted states, evidence kinds, and operation names. Cover their serialized values in regression tests.
 
 ```bash
 npm --prefix frontend run dev
 ```
 
-一体化脚本不运行 Vite dev server，而是每次构建 `frontend/dist` 并由 FastAPI 提供。前端 API 使用相对 `/api` 路径；独立 Vite 开发时需自行处理后端同源/代理需求。
+The integrated launchers build `frontend/dist` and serve it through FastAPI. The frontend uses relative `/api` requests. Provide same-origin routing or a proxy to the backend when using the standalone Vite server.
 
-## API 概览
+## API
 
-所有业务路由以 `/api` 为前缀。FastAPI 自动文档在服务运行时通常可通过 `/docs` 查看，但当静态前端挂载到 `/` 后，实际路由匹配应以 FastAPI 当前注册结果为准；下表是代码中的稳定入口。
+Open `/docs` for the FastAPI schema when the service is running.
 
-| 方法 | 路径 | 行为 |
+| Method | Path | Behavior |
 |---|---|---|
-| GET | `/api/health` | 返回 mode、provider enabled 状态、TACC 作业与排队/剩余时长 |
-| POST | `/api/tacc/jobs` | 本地同源提交 TACC 作业；`restart: true` 先确认旧作业结束再提交 |
-| POST | `/api/requests/parse` | 自然语言 prompt 转 constraints |
-| POST | `/api/runs` | 幂等创建 run，返回 202，并在新建时调度后台任务 |
-| GET | `/api/runs` | 最近 20 个 run |
-| GET | `/api/runs/{run_id}` | 进度与 terminal 结果 |
-| DELETE | `/api/runs/{run_id}` | 删除 terminal run 及其 run-owned 数据 |
-| POST | `/api/runs/{run_id}/retry-guide` | 使用已保存电影和证据，仅重跑 guide生成与发布 |
-| GET | `/api/runs/{run_id}/films/{film_id}` | 入选片目、对应 guide 与证据 |
-| GET | `/api/runs/{run_id}/films/{film_id}/readings` | 确认影片属于该 run，释放数据库会话后查询延伸阅读 |
-| GET | `/api/films/{film_id}/ratings` | 电影评分快照 |
+| GET | `/api/health` | Returns model mode, provider configuration, and TACC wait or remaining time |
+| POST | `/api/tacc/jobs` | Requests a TACC job from the local app |
+| POST | `/api/requests/parse` | Converts a question to structured criteria |
+| POST | `/api/runs` | Creates and schedules a run, returning HTTP 202 |
+| GET | `/api/runs` | Returns the most recent 20 runs |
+| GET | `/api/runs/{run_id}` | Returns progress and the result when available |
+| DELETE | `/api/runs/{run_id}` | Removes a terminal run and its owned records |
+| POST | `/api/runs/{run_id}/retry-guide` | Recreates the guide from saved research |
+| GET | `/api/runs/{run_id}/films/{film_id}` | Returns film metadata, guide details, and evidence |
+| GET | `/api/runs/{run_id}/films/{film_id}/readings` | Checks film membership, closes the database scope, and returns available criticism and further reading |
+| GET | `/api/films/{film_id}/ratings` | Returns persisted rating snapshots |
 
-`POST /api/runs` 的 `submission_key` 是幂等键。相同 key + 相同 constraints 返回已有 run；相同 key + 不同 constraints 返回 409 conflict。
+Sending the same `submission_key` with the same criteria returns the existing run. Changing the criteria for that key returns HTTP 409.
 
-Guide重跑只允许 `partial`、`failed`、`interrupted` 且 `study_result`中已有 selected films/evidence的run。事务认领会将run改回 `running/generating`并清除旧guide/error；后台任务只执行 `GUIDE -> PUBLISH/PUBLISH_PARTIAL`，不会重跑搜索、评估、timeline或ratings。
+A guide retry requires a partial, failed, or interrupted run with selected films and evidence. The transaction locks and claims the run, sets `running/generating`, and clears the prior guide and error. The application uses the `GuideRetrySnapshot` contract from `ai/resume.py`. The background task runs the guide and publication steps using the archived search, assessment, timeline, and ratings.
 
-重试输入使用 `ai/resume.py` 中的 `GuideRetrySnapshot`。应用服务不从 `ai/workflow.py` 导入该类型。
+For `POST /api/tacc/jobs`, pass `previous_job_id` and optionally `restart: true`. The latter verifies cancellation before submitting another job. Concurrent requests share the submission task inside the app process, and a request referring to an earlier job can return the new job already submitted. Localhost and browser Origin checks apply. The frontend polls for updates and offers a manual status refresh.
 
-`POST /api/tacc/jobs` 接受 `previous_job_id` 与可选的 `restart`。单进程内并发请求共享提交任务；旧 job ID 的重复请求返回当前 job ID。取消或提交无法确认时返回错误，前端保留手动刷新入口。该接口限制本地访问，并检查浏览器请求的 Origin。前端继续使用轮询，不使用 SSE。
+DELETE locks the targeted run with `SELECT ... FOR UPDATE`. It returns HTTP 404 for a missing run or HTTP 409 for one that is still queued or running. The repository deletes run-owned links, timeline events, tool calls, evidence, and decisions in dependency order. Films, sources, passages, and ratings are shared.
 
-近期的 DELETE 约束是重要并发不变量：仅 `completed`、`partial`、`failed`、`interrupted` 可删除。repository 先 `SELECT ... FOR UPDATE`，active 的 `queued`/`running` 返回 409 `An active research run cannot be deleted.`，不存在返回 404。因为初始 schema 无级联删除，repository 只按顺序删除该 run 的 timeline links/events、tool calls、evidence、decisions 和 run；共享 film/source/passage/rating 保留。
+## Database migrations
 
-## 数据库迁移
-
-schema 变更必须新增 `backend/migrations/versions/` 下的 Alembic revision，不要修改已部署环境依赖的旧 revision。当前唯一 revision 是 `0001`。
-
-应用默认 `database.create_schema: false`，以 Alembic 为 schema 所有者：
+Create a new revision in `backend/migrations/versions/` for schema changes. The current revision is `0001`. The app defaults to `database.create_schema: false` and uses Alembic for schema management.
 
 ```bash
 DATABASE_URL='postgresql+asyncpg://cinecontext:<encoded-password>@127.0.0.1:5432/cinecontext' \
   ./.venv/bin/python -m alembic -c backend/alembic.ini upgrade head
 ```
 
-创建迁移前先阅读 domain mappings 和当前 SQL migration。由于 schema 使用 PostgreSQL JSONB、TSVECTOR、computed column、GIN 和复合外键，自动生成结果需要人工审查。
+Inspect generated migrations against the domain mappings and SQL for JSONB, TSVECTOR, computed columns, GIN indexes, and composite foreign keys. Check both upgrade and downgrade when changing the schema.
 
-## 测试层次
-
-单元/组件测试：
+## Testing
 
 ```bash
 ./.venv/bin/python -m unittest tests.test_ai_workflow
-```
-
-当前该文件覆盖 enum/JSON shape、timeline filtering、guide citation ownership、transition/runner 契约、DDG/crawler 解析与 URL 安全、provider precedence，以及 terminal run 删除限制。
-
-端到端 smoke：
-
-```bash
-CINECONTEXT_APP=mock CINECONTEXT_PYTHON="$PWD/.venv/bin/python" ./scripts/start.sh
-./.venv/bin/python tests/smoke.py
-```
-
-smoke 针对运行中的真实 API 和 PostgreSQL，覆盖三个 demo 主题及 unsupported topic。可设置 `CINECONTEXT_TEST_URL` 改目标。它不是隔离测试，会在目标数据库创建 run。
-
-前端构建检查：
-
-```bash
 npm --prefix frontend ci
 npm --prefix frontend run build
 ```
 
-## 常见变更位置
+The unit tests cover workflow transitions, serialization, timeline and guide validation, provider selection, crawler behavior, and deletion constraints. Run the API smoke suite separately against a running demo instance.
 
-| 目标 | 修改入口 |
+```bash
+CINECONTEXT_TEST_URL=http://127.0.0.1:8765 ./.venv/bin/python tests/smoke.py
+```
+
+The smoke suite creates runs in the connected database and exercises three supported themes plus an unsupported one. The repository has no committed browser suite or CI tests for live providers and multi-worker recovery.
+
+## Where to make changes
+
+| Change | Entry point |
 |---|---|
-| 新 HTTP 用例 | `api/controllers.py` + `application/services.py`，必要时扩展 contracts/ports |
-| 新领域状态/实体 | `domain/entities.py` + repository protocol + migration + infrastructure implementation |
-| 新 AI 步骤 | `ai/workflow.py`、`ai/nodes.py` 和 transition tests |
-| 新模型供应商 | 实现 `ai/ports.py`，在组合根注册 provider |
-| 新研究供应商 | `ai/research_tools/` 独立文件，并在 `main.py` factory 选择 |
-| 新配置 | `settings.py` typed options + appsettings 默认值 + `.env.example` + 部署文档 |
-| 新 demo 场景 | `mock/demo_data.py` + `mock/ai/model.py` + smoke assertions |
+| HTTP use case | `api/controllers.py`, `application/services.py`, and the relevant contract or port |
+| Domain state or entity | `domain/entities.py`, repository protocol, migration, and infrastructure implementation |
+| Workflow step | `ai/workflow.py`, `ai/nodes.py`, and transition tests |
+| Model provider | `ai/ports.py` and the composition root |
+| Research provider | Adapter in `ai/research_tools/` and the factory in its `main.py` |
+| Settings | Typed `settings.py`, appsettings defaults, `.env.example`, and deployment docs |
+| Demo scenario | `mock/demo_data.py`, `mock/ai/model.py`, and smoke assertions |
 
-## 变更检查清单
-
-1. 确认依赖方向：核心协议不 import 具体 SDK/SQLAlchemy adapter。
-2. 确认外部 HTTP/model 调用不位于数据库事务内。
-3. 确认新增循环有显式上限，节点所有路径设置 outcome。
-4. 确认 evidence、film 和 run ownership 在写入前验证。
-5. 确认 appsettings、typed setting、`.env.example` 和文档变量名一致。
-6. 运行相关 unit test、mock smoke（若行为变化）、前端 build（若 UI 变化）。
-7. 运行 `git diff --check`，检查迁移 upgrade/downgrade 与 API 错误行为。
-
-## 当前测试空白
-
-- 没有浏览器级前端自动化测试。
-- 没有针对真实 OpenAI-compatible、TMDB、Brave 或 OMDb 账号的 CI integration test。
-- smoke 依赖运行中的 mock 服务和 PostgreSQL，不由 unit test 自动启动。
-- 后台任务是进程内 `BackgroundTasks`，当前没有多 worker/崩溃恢复的集成覆盖。
+Before merging, verify that network calls remain outside database transactions, all workflow outcomes and loop limits are explicit, references belong to the correct run or film, and configuration names agree across code and documentation. Run the relevant tests and `git diff --check`.

@@ -13,7 +13,8 @@ from pydantic import BaseModel, Field, ValidationError
 from ..settings import LoggingOptions, ModelOptions
 from ..application.ports import TaccJobControl
 from ..observability import sanitize_message
-from ..contracts import Assessment, ParsedRequest, Plan, Preference, ReferenceMatch, TimelineResearch
+from ..contracts import ParsedRequest, Plan, Preference, ReferenceMatch, TimelineResearch
+from .assessment_draft import AssessmentDraft
 from .guide_draft import GuideDraft
 from .ports import ModelUnavailableError
 from .tacc_transport import TACC_NOT_READY_CODE, TaccSdkTransport
@@ -29,7 +30,9 @@ from .types import (
 
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[3]
-QWEN_TOKEN_LIMITS = {ParsedRequest: 1000, Plan: 700, Assessment: 2400, TimelineResearch: 2400, GuideDraft: 3000}
+QWEN_TOKEN_LIMITS = {
+    ParsedRequest: 1000, Plan: 700, AssessmentDraft: 2400, TimelineResearch: 2400, GuideDraft: 3000,
+}
 
 
 class ReferenceSelection(BaseModel):
@@ -337,8 +340,12 @@ class OpenAIModel:
         )
 
     async def assess(self, constraints, films, evidence):
-        return await self.complete(Assessment,
+        film_numbers = {film.id: number for number, film in enumerate(films, start=1)}
+        evidence = [item for item in evidence if item.film_id is None or item.film_id in film_numbers]
+        draft = await self.complete(AssessmentDraft,
             "Evaluate every candidate once against all requested criteria using the supplied metadata and sources. "
+            "Use the integer film number in each decision and cite integer source numbers in its sources list. "
+            "Use only sources for that film or shared sources where film is null. "
             "Use the submitted form fields as the controlling criteria if they conflict with the original topic. "
             "For explicit genre and style preferences, set preference_fit to 2 for clear source support for the "
             "main preferences, 1 for partial support, or 0 for weak or unknown support or no preferences. "
@@ -364,8 +371,16 @@ class OpenAIModel:
             "Use secondary for a thematic or atmospheric match and explain any differences in period or region. "
             "Reject films that fail an explicit requirement.",
             {"constraints": constraints.model_dump(mode="json"),
-             "films": [film.model_dump(mode="json") for film in films],
-             "evidence": [item.model_dump(mode="json") for item in evidence]})
+             "films": [
+                 {**film.model_dump(mode="json", exclude={"id"}), "film": film_numbers[film.id]}
+                 for film in films
+             ],
+             "evidence": [
+                 {**item.model_dump(mode="json", exclude={"id", "film_id"}),
+                  "source": number, "film": film_numbers.get(item.film_id)}
+                 for number, item in enumerate(evidence, start=1)
+             ]})
+        return draft.resolve(films, evidence)
 
     async def timeline(self, constraints, films, evidence):
         return await self.complete(TimelineResearch,
@@ -377,6 +392,10 @@ class OpenAIModel:
             "dates into a film without film-specific evidence. "
             "Leave sort_year blank for fictional or unknown periods and avoid inferring plot order across films. "
             "For history, include independently sourced historical events that illuminate the selected films. "
+            "Use the documented start year as sort_year. Include the documented start month and day in period "
+            "when the cited evidence gives them, including for events that span multiple years. "
+            "Include a central historical event for each film when supported, and use relation to distinguish "
+            "events the film depicts from events it mentions as background. "
             "Omit game releases and film production or release events. Omit unsupported views. "
             "Give the requested primary timeline axis priority if sources support it. For myth, name the source "
             "tradition or version and leave fictional years unset. The cited source must discuss the named mythic "

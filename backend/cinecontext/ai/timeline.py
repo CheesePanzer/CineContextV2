@@ -16,10 +16,40 @@ from .types import (
 
 
 CALENDAR_YEAR = re.compile(r"(?<![\d,])(?:[12]\d{3}|[12],\d{3})(?!\d)")
+HISTORY_YEAR = re.compile(r"(?<![\d,])(?:\d{1,2},\d{3}|\d{3,4})(?!\d)")
+MONTHS = {
+    name: number
+    for number, month in enumerate(
+        "january february march april may june july august september october november december".split(), start=1,
+    )
+    for name in (month, month[:3])
+}
+MONTHS["sept"] = 9
+MONTH_NAME = re.compile(r"\b(?:" + "|".join(MONTHS) + r")\b\.?", re.I)
 
 
 def calendar_years(text: str) -> set[int]:
     return {int(value.replace(",", "")) for value in CALENDAR_YEAR.findall(text)}
+
+
+def history_date_key(period: str, sort_year: int | None) -> tuple[int, int, int]:
+    """Sort by the start of the recorded period, keeping unknown dates last within a year."""
+    match = HISTORY_YEAR.search(period)
+    if match is None or (sort_year is not None and sort_year < 0):
+        return sort_year if sort_year is not None else 100_000, 13, 32
+    year = int(match[0].replace(",", ""))
+    iso = re.match(r"-(0[1-9]|1[0-2])(?:-(0[1-9]|[12]\d|3[01]))?(?!\d)", period[match.end():])
+    if iso:
+        return year, int(iso[1]), int(iso[2]) if iso[2] else 32
+    prefix = period[:match.start()]
+    month = MONTH_NAME.search(prefix)
+    if month is None:
+        return year, 13, 32
+    number = MONTHS[month[0].lower().rstrip(".")]
+    day = re.match(r"\s+(\d{1,2})\b", prefix[month.end():]) or re.search(
+        r"(\d{1,2})(?:\s*[-–—]\s*\d{1,2})?\s*$", prefix[:month.start()]
+    )
+    return year, number, int(day[1]) if day and 1 <= int(day[1]) <= 31 else 32
 
 
 class TimelineBuilder:
@@ -45,7 +75,15 @@ class TimelineBuilder:
             subset = {key: event for key, event in events.items() if event.axis == axis}
             if not subset:
                 continue
-            ordered = self._ordered_research_view(subset, research, evidence_ids)
+            if axis == ResearchTimelineAxis.HISTORY:
+                ordered = [
+                    TimelineViewEvent(**event.model_dump(), order_group=index)
+                    for index, event in enumerate(sorted(
+                        subset.values(), key=lambda event: history_date_key(event.period, event.sort_year)
+                    ))
+                ]
+            else:
+                ordered = self._ordered_research_view(subset, research, evidence_ids)
             if ordered:
                 views[TimelineAxis(axis.value)] = ordered
                 valid_edges.extend(self._valid_edges(subset, ordered, research, evidence_ids))
@@ -145,4 +183,9 @@ class TimelineBuilder:
             if edge.earlier in keys and edge.later in keys and edge.earlier != edge.later
             and set(edge.evidence_ids) <= evidence_ids
             and events[edge.earlier].version == events[edge.later].version
+            and (
+                events[edge.earlier].axis != ResearchTimelineAxis.HISTORY
+                or history_date_key(events[edge.earlier].period, events[edge.earlier].sort_year)
+                   <= history_date_key(events[edge.later].period, events[edge.later].sort_year)
+            )
         ]

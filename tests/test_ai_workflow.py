@@ -225,6 +225,35 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         timeline = TimelineBuilder().build([film], research, [evidence])
         self.assertNotIn(TimelineAxis.STORY, timeline.views)
 
+    def test_history_orders_documented_dates_and_ignores_reversed_model_edges(self):
+        evidence = sample_evidence(None)
+        dates = [
+            ("campaign", "August 1942–February 1943", 1942),
+            ("year-only", "1942–1943", 1942),
+            ("midway", "1942-06-04", 1942),
+            ("pearl-harbor", "December 7, 1941", 1941),
+            ("coral-sea", "4–8 May 1942", 1942),
+            ("earlier-in-may", "May 1, 1942", 1942),
+        ]
+        research = TimelineResearch.model_validate({
+            "events": [
+                {"id": name, "axis": "history", "label": name, "period": period,
+                 "sort_year": year, "evidence_ids": [evidence.id]}
+                for name, period, year in dates
+            ],
+            "order": [
+                {"earlier": "campaign", "later": "coral-sea", "evidence_ids": [evidence.id]},
+                {"earlier": "coral-sea", "later": "midway", "evidence_ids": [evidence.id]},
+            ],
+        })
+        result = TimelineBuilder().build([], research, [evidence])
+        self.assertEqual([event["id"] for event in result.views_json()["history"]], [
+            "pearl-harbor", "earlier-in-may", "coral-sea", "midway", "campaign", "year-only",
+        ])
+        self.assertEqual([(edge.earlier, edge.later) for edge in result.valid_edges], [
+            ("coral-sea", "midway"),
+        ])
+
     def test_story_event_cannot_borrow_another_films_source(self):
         film = sample_film()
         other = film.model_copy(update={"id": uuid4()})
@@ -530,6 +559,26 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WebResearchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_web_research_retries_a_temporary_proxy_failure(self):
+        attempts = 0
+
+        def handler(request):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise httpx.ProxyError("503 Service Unavailable", request=request)
+            return httpx.Response(200, json={"query": {"pages": [{
+                "title": "History", "fullurl": "https://en.wikipedia.org/wiki/History",
+                "extract": "Historical evidence",
+            }]}})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            tools = create_research_tools(SimpleNamespace(), client, ToolsOptions(wikipedia_enabled=True))
+            results = await tools.search_web("history")
+
+        self.assertEqual(attempts, 2)
+        self.assertEqual([item.body for item in results], ["Historical evidence"])
+
     def test_duckduckgo_parser_extracts_snippets_and_decodes_redirects(self):
         parser = DuckDuckGoHTMLParser()
         parser.feed('''
@@ -751,6 +800,14 @@ class CandidateDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(article_url("https://criterion.com.example/current/posts/42-film", "criterion.com"))
         self.assertFalse(article_url("https://criterion.com/films/42-film", "criterion.com"))
 
+    async def test_midway_readings_match_the_correct_film(self):
+        service = WebFilmReadings(Options(ToolsOptions(duckduckgo={"enabled": False})))
+        film = sample_film().model_copy(update={"title": "Midway", "original_title": "Midway"})
+        for year, author in ((1976, "Roger Ebert"), (2019, "Odie Henderson")):
+            with self.subTest(year=year):
+                readings = await service.for_film(film.model_copy(update={"year": year}))
+                self.assertEqual([(row.title, row.author) for row in readings], [(f"Midway ({year})", author)])
+
 
 class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
     def test_sanitize_message_redacts_secrets_and_truncates(self):
@@ -859,6 +916,41 @@ class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
 class StructuredModelOutputTests(unittest.IsolatedAsyncioTestCase):
     class Result(BaseModel):
         value: str
+
+    async def test_assessment_keeps_supported_decisions_when_model_mixes_valid_and_invalid_citations(self):
+        first, second = sample_film(), sample_film()
+        first_source = sample_evidence(first.id)
+        unrelated_source = sample_evidence(uuid4())
+        malformed_uuid = "68eba5c0-daff-48b1-9ba0-0103200c920bb"
+        model = OpenAIModel(ModelOptions(api_key="test", model_id="test"), LoggingOptions())
+        ctx = context(CurationState.ASSESS)
+        ctx.model = model
+        ctx.evidence = [first_source, unrelated_source]
+
+        async def reply(system, payload, schema):
+            request = json.loads(payload)
+            self.assertEqual([film["film"] for film in request["films"]], [1, 2])
+            self.assertEqual([(source["source"], source["film"]) for source in request["evidence"]], [(1, 1)])
+            self.assertNotIn(str(first_source.id), payload)
+            return ModelResponse(json.dumps({"decisions": [
+                {"film": 1, "status": "accepted", "reason": "Fits", "sources": [1, malformed_uuid, 700, 1]},
+                {"film": 2, "status": "accepted", "reason": "Unverified", "sources": [malformed_uuid, 1, 700]},
+            ]}), "stop")
+
+        async def logged(ctx, operation, action):
+            return await action()
+
+        model._chat_complete = AsyncMock(side_effect=reply)
+        try:
+            decisions = await AssessNode(SimpleNamespace(logged=logged))._assess(ctx, [first, second])
+            model._chat_complete.assert_awaited_once()
+            self.assertEqual(decisions[first.id].status, DecisionStatus.ACCEPTED)
+            self.assertEqual(decisions[first.id].evidence_ids, [first_source.id])
+            self.assertEqual(decisions[second.id].status, DecisionStatus.NEEDS_EVIDENCE)
+            self.assertEqual(decisions[second.id].evidence_ids, [])
+            self.assertTrue(decisions[second.id].next_query)
+        finally:
+            await model.close()
 
     async def test_invalid_json_is_retried_then_succeeds(self):
         model = OpenAIModel(ModelOptions(

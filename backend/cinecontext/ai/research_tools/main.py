@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 import logging
 from typing import TYPE_CHECKING, Protocol
@@ -120,6 +121,15 @@ class ResearchToolsFacade:
         return await self.local.search_passages(query, film_id)
 
     async def search_web(self, query: str, film_id: UUID | None = None):
+        try:
+            return await self.web.search(query, film_id)
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.ProxyError, httpx.RemoteProtocolError):
+            pass
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code not in {502, 503, 504}:
+                raise
+        logger.debug("Retrying web research after a temporary upstream failure")
+        await asyncio.sleep(0.5)
         return await self.web.search(query, film_id)
 
     async def lookup_ratings(self, film: FilmProjection):

@@ -6,6 +6,7 @@ from openai import APIConnectionError, APIError, APITimeoutError, Authentication
 
 from ..contracts import Constraints, ParseRequest, RunRequest
 from ..ai.ports import ApplicationModelProvider, ModelUnavailableError
+from ..ai.timeline import history_date_key
 from ..ai.types import EvidenceRecord, FilmProjection, film_title_key
 from ..ai.resume import GuideRetrySnapshot
 from ..domain import CurationRun, RunStatus
@@ -186,6 +187,12 @@ class RunApplicationService:
             study = {**study, "films": [
                 {**film, "poster_path": posters.get(film["id"], film.get("poster_path"))} for film in films
             ]}
+        views = (study or {}).get("timeline_views") or {}
+        if views.get("history"):
+            history = sorted(views["history"], key=lambda event: history_date_key(
+                event["period"], event.get("sort_year"),
+            ))
+            study = {**study, "timeline_views": {**views, "history": history}}
         return {"run_id": str(run.id), "status": run.status, "stage": run.stage,
                 "progress": run.progress, "updated_at": run.updated_at, "constraints": run.constraints,
                 "model_mode": run.model_mode, "error": run.error, "study": study, "guide": run.guide}

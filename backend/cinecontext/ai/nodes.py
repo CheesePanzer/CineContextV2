@@ -93,6 +93,9 @@ class WorkflowOperations:
                 OperationName.DISCOVER_CATALOG: "TMDB keyword discovery was unavailable.",
                 OperationName.LOOKUP_MOVIE: "TMDB metadata could not be verified for some candidates.",
                 OperationName.LOOKUP_RATINGS: "External ratings are unavailable for some films.",
+                OperationName.SEARCH_WEB: "Some film source lookups could not be completed.",
+                OperationName.SEARCH_WEB_CONTEXT: "Some historical context lookups could not be completed.",
+                OperationName.SEARCH_WEB_FOLLOW_UP: "Some follow-up source lookups could not be completed.",
             }.get(operation, "Some external sources are unavailable.")
             if notice not in ctx.limitations:
                 ctx.limitations.append(notice)

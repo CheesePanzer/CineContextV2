@@ -1,155 +1,111 @@
 # CineContext
 
-CineContext 是一个有证据约束的电影研究与观影指南应用。用户用自然语言描述主题、年代、地区等条件，系统寻找候选电影、核对来源、生成带引用的观影指南，并提供上映时间、故事时期、神话和历史等时间线视图。
+CineContext turns a film research question into a viewing guide with sources. It looks up candidate films, checks them against the brief, and organizes the results by viewing order, release date, story period, mythology, or historical context. Select a film to see its synopsis, audience ratings, and available criticism.
 
-项目同时提供确定性的 mock 模式和连接真实模型/检索服务的 production 模式。mock 不是纯前端假数据：它仍使用 PostgreSQL、Alembic、完整状态机和持久化流程。
+The project includes a deterministic demo and a production mode for live research. Both modes use the same PostgreSQL schema, workflow, and API. The demo runs without TACC access or API keys.
 
-## 主要能力
+## Getting Started Instructions
 
-- 将自然语言问题解析为结构化电影筛选条件。
-- 结合本地全文检索、TMDB 和网页检索发现及核验候选片目。
-- 强制校验入选电影的来源、引用归属和指南覆盖范围。
-- 生成 release、story、myth、history 多轴时间线。
-- 记录研究进度、证据快照、候选决策、工具调用与评分快照。
-- 使用 submission key 保证重复提交幂等，并保留可查询的研究结果。
+Use Python 3.14, Node.js 22.12 or later, npm, and PostgreSQL. Put `initdb` and `pg_ctl` on PATH to let the launcher create a local database. You can also set `DATABASE_URL` to an existing PostgreSQL instance. See [deployment and configuration](docs/deployment.md) for Docker and detailed setup.
 
-## 技术栈
+### Start the demo
 
-| 层 | 技术 |
-|---|---|
-| 前端 | React 19、Vite 7 |
-| Web/API | FastAPI、Uvicorn |
-| 应用框架 | 仓库内置 Alcedo（DI、配置、UoW、错误映射） |
-| 数据 | PostgreSQL、SQLAlchemy Async、asyncpg、Alembic |
-| AI | OpenAI Python SDK、课程 TACC Qwen、OpenAI-compatible Chat Completions / Responses |
-| 外部研究 | TMDB、Brave LLM Context、Wikipedia、DuckDuckGo HTML + crawler、OMDb |
+For macOS or Linux, run these commands from the repository root.
 
-## 5 分钟启动
+```bash
+python3.14 -m venv .venv
+CINECONTEXT_PYTHON="$PWD/.venv/bin/python" ./scripts/start.sh
+```
 
-前置要求：Python 3.14、Node.js/npm、PostgreSQL 命令 `initdb` 和 `pg_ctl`。详细安装、Docker 数据库和生产配置见[部署文档](docs/deployment.md)。
-
-### Windows PowerShell（mock）
+For Windows PowerShell, run the following.
 
 ```powershell
 py -3.14 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e .\backend
 .\scripts\start.ps1
 ```
 
-若当前进程禁止执行脚本：
+If the PowerShell execution policy blocks the launcher, use the following process-specific invocation.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1
 ```
 
-### Bash（mock）
+The launcher installs missing backend dependencies, migrates PostgreSQL, installs frontend dependencies with `npm ci`, builds the frontend, and starts the app. Open [CineContext](http://127.0.0.1:8765). Use a fresh checkout or set the local configuration to demo mode if an existing `.env` selects live providers. Bash can also use a Conda environment named `cinecontext`.
 
-`start.sh` 默认从名为 `cinecontext` 的 Conda 环境寻找 Python；也可显式指定解释器：
+### Verify the result
 
-```bash
-python3.14 -m venv .venv
-./.venv/bin/python -m pip install -e backend
-CINECONTEXT_PYTHON="$PWD/.venv/bin/python" ./scripts/start.sh
-```
+1. Select **New research** and enter “Find five films inspired by Norse mythology and show how they relate to the mythological timeline.”
+2. Review the brief, then start the research. The result should show **Completed** and five films. The release timeline shows entries for 1986, 1989, 2011, 2013, and 2022. The mythology timeline follows four stages from creation through renewal.
+3. Select *Gåten Ragnarok* (2013). The detail panel shows the film information, its two release entries, sources, and demo rating snapshots. The guide cites sources included in the result.
 
-启动器会安装/校验依赖、执行 Alembic、运行 `npm ci`、构建 `frontend/dist`，再由 FastAPI 在 `http://127.0.0.1:8765` 提供 API 和静态前端。未设置 `DATABASE_URL` 时，它会在 `.runtime/` 初始化本机 PostgreSQL 实例。
+### Enable live research with TACC
 
-使用课程 TACC 时，可以用一条命令提交 Qwen 作业并启动应用。开发和部署配置见 [TACC 部署说明](docs/deployment.md#tacc-qwen)。
+Configure the course `tcloud` SDK on the computer running the backend. Follow the [TACC setup](docs/deployment.md#tacc-qwen) to set the model mode and optional TMDB token in `.env`. Submit the first job and start the app from Bash. Once the app is tracking a job, use **Request TACC GPUs** in the sidebar to replace it when it ends.
 
 ```bash
-./scripts/start.sh --submit-tacc
+CINECONTEXT_PYTHON="$PWD/.venv/bin/python" ./scripts/start.sh --submit-tacc
 ```
 
-使用其他 OpenAI-compatible 供应商时，按供应商要求提供凭据。
+Wait for **TACC ready**. A single GPU job can serve multiple research requests until its time limit. An existing job can be passed to `start.sh` by job ID. The backend also accepts a configured [OpenAI-compatible endpoint](docs/deployment.md#deepseek--openai-compatible-example).
+
+## Detailed Instructions
+
+### Reproduce the software checks
+
+Install the backend in editable mode if it has not been installed by the launcher. Run these commands in the repository root. Use the interpreter from your project environment.
 
 ```bash
-CINECONTEXT_APP=production APP__MODEL__API_KEY='<key>' \
-APP__MODEL__MODEL_ID='<model>' ./scripts/start.sh
-```
-
-运行日志默认写入 `.runtime/logs/cinecontext.log`；配置、轮转和按 `run_id`/diagnostic ID 排障见 [部署文档](docs/deployment.md#日志与故障关联)。
-
-## 架构概览
-
-```text
-React / HTTP
-     |
-FastAPI controllers + Alcedo request scope
-     |
-Application services / transaction boundaries
-     |
-Domain entities + repository/AI ports
-     |
-+----------------------+-------------------------+
-| AI workflow          | Infrastructure          |
-| nodes -> transitions | SQLAlchemy/PostgreSQL   |
-| model + research     | scoped persistence/UoW  |
-+----------------------+-------------------------+
-        |                         |
- OpenAI-compatible       TMDB / web / OMDb
-```
-
-依赖方向以领域和应用协议为中心。`backend/cinecontext/main.py` 与 `backend/cinecontext/mock/main.py` 是 production/mock 组合根；`backend/cinecontext/bootstrap.py` 组装共同的 FastAPI、Alcedo、数据库和静态资源。完整说明见[系统架构](docs/architecture.md)。
-
-## 仓库结构
-
-```text
-.
-├── backend/
-│   ├── alcedo/                  # 内置框架：DI、配置、UoW、Web 集成
-│   ├── cinecontext/
-│   │   ├── api/                 # 薄 FastAPI 控制器
-│   │   ├── application/         # 用例、端口、事务边界
-│   │   ├── domain/              # 实体、运行状态、仓储协议
-│   │   ├── infrastructure/      # SQLAlchemy 仓储与持久化适配器
-│   │   ├── ai/                  # 模型端口、工作流、校验、研究工具
-│   │   └── mock/                # 确定性模型、演示数据、mock 组合根
-│   ├── migrations/              # Alembic 迁移
-│   ├── appsettings.yaml         # production 默认配置
-│   └── appsettings.mock.yaml    # mock 默认配置
-├── frontend/                    # React 单页应用；构建结果为 dist/
-├── scripts/                     # Windows/Bash 一体化启动器
-├── tests/                       # 单元测试和运行中服务的 smoke 测试
-└── docs/                        # 面向维护者和部署者的文档
-```
-
-`backend/alcedo` 是 vendored Alcedo 实现。应用代码应从公开的 `alcedo` exports 消费框架能力，例如 `from alcedo import UnitOfWork`。
-
-## 文档索引
-
-| 文档 | 内容 |
-|---|---|
-| [系统架构](docs/architecture.md) | 设计原则、DDD/Alcedo 分层、组合根、事务、provider 与数据流 |
-| [部署与配置](docs/deployment.md) | 环境准备、PostgreSQL、全部配置、启动、健康检查和排错 |
-| [AI 工作流](docs/ai-workflow.md) | 状态图、节点/转移契约、校验、审计和扩展方式 |
-| [工具调用与 Function Calling](docs/function-calling.md) | 当前工具清单、调用时机、Provider、审计，以及与原生 Function Calling的区别 |
-| [开发指南](docs/development.md) | 目录约定、API、迁移、测试及变更检查清单 |
-
-## 测试
-
-安装后端为 editable package 后，在仓库根目录运行单元测试：
-
-```bash
+python -m pip install -e backend
 python -m unittest tests.test_ai_workflow
+npm --prefix frontend ci
+npm --prefix frontend run build
 ```
 
-启动 mock 服务后运行端到端 smoke：
+With the demo running, run the end-to-end checks in a second terminal.
 
 ```bash
 python tests/smoke.py
 ```
 
-可用 `CINECONTEXT_TEST_URL` 指向非默认地址。前端当前没有独立测试套件，可用构建检查验证：
+Set `CINECONTEXT_TEST_URL` if you changed the web port. The checks create real research runs in the connected database and poll for their result. They use fixtures from `backend/cinecontext/mock/` and exercise four cases.
 
-```bash
-npm --prefix frontend run build
+| Case | Expected result |
+|---|---|
+| Five films inspired by Norse mythology | Completed, with chronological release dates, four myth stages, film-specific citations, and a demo rating |
+| European films on surveillance released in the 1980s | Partial, with no selection and an explanation of the release constraint |
+| Three films about Romanian political memory | Completed, with an ordered historical timeline and two films linked to the 1989 event |
+| Films about settling Mars | Partial, with no films in the demo corpus |
+
+### Verify a live run
+
+With TACC ready and TMDB configured, ask for four key films for a newcomer to the Marvel Cinematic Universe. The criteria should ask for four films. Check that the viewing order contains four distinct films when all four are supported, and open their posters to see the synopsis, rating source, and available reviews. BFI supplies editorial coverage for several MCU titles. Verified editorial coverage varies by film, and each article links to its publisher. OMDb coverage requires its own API key.
+
+Live film selection, sources, and latency vary with the model, tool responses, and external service availability. The TACC queue wait is separate from the execution time of a research request. The deterministic demo covers three themes, with eleven films. Run logs are written to `.runtime/logs/cinecontext.log` by default. See [logs and diagnostics](docs/deployment.md#logs-and-diagnostics).
+
+### Architecture and repository layout
+
+```text
+React -> FastAPI controllers -> application services -> domain ports
+                                       |
+                     +-----------------+------------------+
+                     |                                    |
+              AI workflow and providers        scoped repositories
+              TACC / TMDB / web / OMDb          PostgreSQL / Alembic
 ```
 
-## 当前状态与限制
+| Path | Responsibility |
+|---|---|
+| `backend/alcedo/` | Vendored Alcedo framework for dependency injection, configuration, and units of work |
+| `backend/cinecontext/api/`, `application/`, `domain/` | HTTP handlers, use cases and transactions, and domain data and protocols |
+| `backend/cinecontext/ai/`, `infrastructure/` | Model and research adapters, workflow, validation, and SQLAlchemy persistence |
+| `backend/cinecontext/mock/`, `backend/migrations/` | Deterministic demo and Alembic schema |
+| `frontend/`, `scripts/`, `deploy/tacc/` | React app, local launchers, and the course GPU job bundle |
+| `tests/`, `docs/` | Unit and end-to-end checks, and technical documentation |
 
-- 当前版本为 `0.1.0`，单进程 FastAPI `BackgroundTasks` 执行研究任务，不是分布式任务队列。
-- mock 数据集覆盖 Norse mythology、state surveillance、Romanian political memory 三组演示主题，共 11 部电影；其他主题可能只得到部分或空结果。
-- production 输出指南为英文；来源摘录保留原始语言。
-- 免费 DuckDuckGo/crawler 路径是 best effort，不渲染 JavaScript，且可能被限流、站点策略或 `robots.txt` 限制。
-- PostgreSQL 是当前 schema 和全文检索能力的目标数据库；迁移包含 PostgreSQL `JSONB`、`TSVECTOR` 与 GIN 索引。
-- 启动时会把上次仍为 queued/running 的任务标记为 interrupted；任务不会自动恢复。
+Production and demo entry points share `backend/cinecontext/bootstrap.py`. Research executes in a single FastAPI process. The browser polls for progress, and a service restart marks any unfinished run as interrupted. Production guides are written in English, and source excerpts can retain their original language.
+
+- [System architecture](docs/architecture.md)
+- [Deployment and configuration](docs/deployment.md)
+- [AI workflow](docs/ai-workflow.md)
+- [Research tools and function calling](docs/function-calling.md)
+- [Development and API guide](docs/development.md)
