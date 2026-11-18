@@ -35,15 +35,23 @@ sed -e '/^export CUDA_VISIBLE_DEVICES=/d' \
     -e 's/--max-model-len 32768/--max-model-len 16384/' \
     -e 's/--max-num-seqs 4/--max-num-seqs 1 --enforce-eager/' \
     "$QWEN_PROJECT_ROOT/serve.sh" > "$serve"
-bash "$serve" &
-server_pid=$!
-
 cleanup() {
-    kill "$server_pid" 2>/dev/null || true
-    wait "$server_pid" 2>/dev/null || true
+    rm -f -- "$TACC_USERDIR/cinecontext-course-kit/e2e-$SLURM_JOB_ID/ready"
+    printf 'GPU memory after service shutdown (MiB):\n'
+    nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits || true
     /usr/bin/python3 -c 'import shutil, sys; shutil.rmtree(sys.argv[1], ignore_errors=True)' "$QWEN_RUN_DIR"
 }
 trap cleanup EXIT
-trap 'exit 143' TERM
-trap 'exit 130' INT
-/usr/bin/python3 -u worker.py "$server_pid"
+
+/usr/bin/python3 -u "$TACC_WORKDIR/service_supervisor.py" "$serve" "$TACC_WORKDIR/worker.py" &
+supervisor_pid=$!
+forward_stop() {
+    # The supervisor handles TERM even if the shell started it with INT ignored.
+    trap '' TERM INT
+    kill -TERM "$supervisor_pid" 2>/dev/null || true
+    wait "$supervisor_pid" || true
+    exit "$1"
+}
+trap 'forward_stop 143' TERM
+trap 'forward_stop 130' INT
+wait "$supervisor_pid"

@@ -91,7 +91,7 @@ class TaccJobs:
             raise ServiceUnavailableError("Check the configured list of TACC nodes to exclude.")
         with tempfile.TemporaryDirectory(prefix="cinecontext-tacc-") as folder:
             deployment = Path(folder)
-            for name in ("job.sh", "worker.py"):
+            for name in ("job.sh", "worker.py", "service_supervisor.py"):
                 shutil.copy2(DEPLOYMENT / name, deployment / name)
             config = (DEPLOYMENT / "tuxiv.conf").read_text()
             config = config.replace("  general:\n", f"  general:\n    - exclude={excluded}\n", 1)

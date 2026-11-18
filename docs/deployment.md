@@ -128,6 +128,8 @@ tcloud cat slurm_log/cinecontext-qwen-JOB_ID.log
 
 GPU 作业申请两张卡，最长运行一小时。网页会显示排队、加载和就绪状态，日志出现 `CINECONTEXT_QWEN_READY` 后即可提交研究。同一个作业可以处理多条请求。演示结束后可执行 `tcloud cancel -j JOB_ID`。下次启动模型后，使用新的作业编号。
 
+作业停止时，`service_supervisor.py` 会关闭队列 worker 和 vLLM 的进程组。Slurm 日志中的 `CINECONTEXT_CLEANUP` 标记记录停止信号，之后会打印 GPU 剩余显存。单次推理超时返回 HTTP 504，作业仍可处理后续请求。
+
 网页约每 15 秒查询一次状态。排队时显示从提交起已等待多久。分到 GPU 后，剩余时间按申请时限减去 Slurm 报告的运行时长计算，包含模型加载时间。手动提交且没有本地提交记录的作业只显示状态。
 
 若 `tcloud ps -j JOB_ID` 显示 `PD (Resources)`，作业还在等 GPU。若作业刚启动就退出，检查 Slurm 日志里的显存检查结果。遇到明确的显存不足时，可以在提交配置的 `job.general` 加上 `exclude=NODE_NAME`，再提交并使用新编号。

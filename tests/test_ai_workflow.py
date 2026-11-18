@@ -1047,6 +1047,24 @@ class TaccApiTests(unittest.TestCase):
 
 
 class TaccRestartTests(unittest.IsolatedAsyncioTestCase):
+    async def test_excluded_node_submission_packages_the_service_supervisor(self):
+        jobs = TaccJobs(Options(ModelOptions(mode="tacc", tacc_job_id="42")))
+
+        async def submit(command, *, timeout, cwd):
+            self.assertEqual(command, "submit")
+            self.assertEqual(timeout, 170)
+            self.assertEqual({path.name for path in cwd.iterdir()}, {
+                "job.sh", "worker.py", "service_supervisor.py", "tuxiv.conf",
+            })
+            self.assertIn("    - exclude=node-1,node-2\n", (cwd / "tuxiv.conf").read_text())
+            return b"Submitted batch job 43\n"
+
+        with patch.dict(os.environ, {"CINECONTEXT_TACC_EXCLUDE_NODES": "node-1,node-2"}):
+            self.assertEqual(
+                await jobs._submit_configured_job(SimpleNamespace(command=submit)),
+                b"Submitted batch job 43\n",
+            )
+
     async def test_restart_is_shared_by_concurrent_requests_and_updates_the_saved_job(self):
         jobs = TaccJobs(Options(ModelOptions(mode="tacc", tacc_job_id="42")))
         transport = SimpleNamespace(

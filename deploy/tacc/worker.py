@@ -3,16 +3,14 @@
 import json
 import os
 import socket
-import sys
 import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-def wait_for_model(base_url, server_pid):
+def wait_for_model(base_url):
     while True:
-        os.kill(server_pid, 0)
         try:
             with urlopen(base_url + "/models", timeout=3) as response:
                 if any(model["id"] == "qwen3.8-27b" for model in json.load(response)["data"]):
@@ -36,15 +34,14 @@ def complete(base_url, data):
         return {"status": 504, "body": {"error": {"message": "TACC inference timed out"}}}
 
 
-def main(server_pid):
+def main():
     base_url = os.environ["QWEN_BASE_URL"]
-    wait_for_model(base_url, server_pid)
+    wait_for_model(base_url)
     queue = Path(os.environ["TACC_USERDIR"]) / "cinecontext-course-kit" / ("e2e-" + os.environ["SLURM_JOB_ID"])
     queue.mkdir(mode=0o700, parents=True, exist_ok=True)
     (queue / "ready").write_text("qwen3.8-27b\n")
     print("CINECONTEXT_QWEN_READY", flush=True)
     while True:
-        os.kill(server_pid, 0)
         for request in sorted(queue.glob("*.request.json"), key=lambda path: path.stat().st_mtime):
             reply = queue / request.name.replace(".request.json", ".response.json")
             if not reply.exists():
@@ -59,4 +56,4 @@ def main(server_pid):
 
 
 if __name__ == "__main__":
-    main(int(sys.argv[1]))
+    main()
