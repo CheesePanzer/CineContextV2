@@ -15,6 +15,7 @@ export default function ResearchSidebar({
   const modelName = health?.model_mode === 'mock' ? 'Local demo' : health?.model_id || 'Model';
   const lastStatus = TACC_STATUS_NAMES[health?.model_status] || (health?.status === 'ok' ? 'App ready' : 'Connecting');
   const modelStatus = healthFailed ? 'App connection unavailable' : lastStatus;
+  const confirmed = TACC_STATUS_NAMES[health?.tacc_job?.last_confirmed_status];
 
   function openRun(item) {
     navigate(TERMINAL_STATUSES.has(item.status)
@@ -53,6 +54,10 @@ export default function ResearchSidebar({
           <div role="status">
             <small>{modelStatus}</small>
             {healthFailed && health && <span className="sidebar-model-note">Last known: {lastStatus}</span>}
+            {!healthFailed && health?.model_status === 'unavailable' && <span className="sidebar-model-note">
+              {confirmed ? `Last confirmed: ${confirmed} · ${health.tacc_job.last_confirmed_seconds}s ago`
+                : 'Unable to check the job. Refresh to try again.'}
+            </span>}
           </div>
           {!healthFailed && <div className="sidebar-model-timing"><TaccJobTiming health={health} /></div>}
           {(submittingTacc || (!healthFailed && health?.tacc_resubmit_enabled && health.model_status === 'stopped')) &&

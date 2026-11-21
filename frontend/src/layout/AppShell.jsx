@@ -46,7 +46,10 @@ export default function AppShell() {
         if (!active) return;
         setHealth({...result, receivedAt: Date.now()});
         setHealthFailed(false);
-        if (result.model_mode === 'tacc') timer = setTimeout(checkHealth, HEALTH_REFRESH_MS);
+        if (result.model_mode === 'tacc') {
+          const interval = result.tacc_job?.last_confirmed_status ? 7000 : HEALTH_REFRESH_MS;
+          timer = setTimeout(checkHealth, interval);
+        }
       } catch {
         if (active) {
           setHealthFailed(true);

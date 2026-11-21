@@ -3,6 +3,16 @@
 NORSE = "norse"
 SURVEILLANCE = "surveillance"
 MEMORY = "memory"
+MEDIEVAL = "medieval"
+ROMANIAN_NEW_WAVE = "romanian new wave"
+ITALIAN_NEOREALISM = "italian neorealism"
+MARVEL = "marvel"
+SPIDER_MAN = "spider-man"
+
+ADDITIONAL_THEMES = {
+    "four-months-2007": [ROMANIAN_NEW_WAVE],
+    "thor-2011": [MARVEL],
+}
 
 FILMS = [
     (NORSE, "valhalla-1986", "Valhalla", 1986, "DK", "Peter Madsen / Jeffrey James Varab",
@@ -16,7 +26,7 @@ FILMS = [
     (NORSE, "thor-2011", "Thor", 2011, "US", "Kenneth Branagh",
      "https://www.marvel.com/movies/thor", "Marvel · Thor",
      "Odin rules Asgard in Marvel's adaptation. Thor is banished to Earth while Loki schemes in Asgard.",
-     "Marvel recasts the relationships among the Norse gods as a superhero coming-of-age story.", ""),
+     "Thor introduces Asgard, the family rivalry with Loki, and the mythological side of the MCU.", ""),
     (NORSE, "ragnarok-2013", "Gåten Ragnarok", 2013, "NO", "Mikkel Brænne Sandemose",
      "https://www.rottentomatoes.com/m/gaten_ragnarok", "Rotten Tomatoes · Gåten Ragnarok",
      "A modern Norwegian archaeologist discovers runes describing Ragnarök. The investigation turns into a monster adventure.",
@@ -44,11 +54,79 @@ FILMS = [
     (MEMORY, "four-months-2007", "4 Months, 3 Weeks and 2 Days", 2007, "RO BE", "Cristian Mungiu",
      "https://www.eyefilm.nl/en/whats-on/4-maanden-3-weken-2-dagen/263783", "Eye Filmmuseum · Film overview",
      "In Romania in 1987, two students try to arrange an abortion under restrictive laws.",
-     "The students' experience shows how state policy reaches into private life.", "1987"),
+     "Mungiu’s tightly observed single-day story shows how state policy reaches into the students’ private lives.", "1987"),
     (MEMORY, "east-2006", "12:08 East of Bucharest", 2006, "RO", "Corneliu Porumboiu",
      "https://www.quinzaine-cineastes.fr/en/film/1208-east-of-bucharest", "Directors’ Fortnight · 12:08 East of Bucharest",
      "Sixteen years after the revolution, a local TV show asks residents whether their town actually took part.",
      "The TV discussion shows how people turn conflicting memories into public accounts of the revolution.", "Sixteen years after the revolution"),
+    (MEDIEVAL, "medieval-2022", "Medieval", 2022, "CZ", "Petr Jákl",
+     "https://www.filmovyprehled.cz/cs/film/402240/jan-zizka", "Czech National Film Archive · Medieval",
+     "The film begins in 1402 amid a power struggle over the Bohemian crown.",
+     "Start with the closest setting to the game. The drama follows Jan Žižka through rivalry over the Bohemian crown and takes liberties with his life.", "1402, Bohemia"),
+    (MEDIEVAL, "joan-1928", "The Passion of Joan of Arc", 1928, "FR", "Carl Theodor Dreyer",
+     "https://www.bfi.org.uk/lists/10-great-films-set-middle-ages", "BFI · 10 great films set in the middle ages",
+     "Dreyer focuses on Joan of Arc's trial during the Hundred Years' War.",
+     "Dreyer’s close-ups turn a medieval trial into a study of institutional power and individual conviction.", "Hundred Years’ War"),
+    (MEDIEVAL, "marketa-1967", "Marketa Lazarová", 1967, "XC", "František Vláčil",
+     "https://www.criterion.com/current/posts/2809-cinema-of-the-wolf-the-mystery-of-marketa-lazarova", "Criterion · Cinema of the Wolf",
+     "Vláčil depicts violent rival clans amid overlapping pagan and Christian practices.",
+     "Vláčil’s images and sound evoke an earlier Bohemia where pagan and Christian practices coexist.", "13th-century Bohemia"),
+    (ROMANIAN_NEW_WAVE, "tuesday-2010", "Tuesday, After Christmas", 2010, "RO", "Radu Muntean",
+     "https://www.bfi.org.uk/sight-and-sound/interviews/radu-muntean-threes-crowd", "Sight and Sound · Radu Muntean",
+     "A marriage reaches a crisis over the Christmas period.",
+     "Long takes and carefully rehearsed dialogue show how a quiet marriage crisis can carry the weight of a Romanian New Wave film.", ""),
+    (ROMANIAN_NEW_WAVE, "childs-pose-2013", "Child's Pose", 2013, "RO", "Călin Peter Netzer",
+     "https://www.bfi.org.uk/lists/10-great-romanian-new-wave-films", "BFI · 10 great Romanian New Wave films",
+     "A socially connected woman intervenes after her son causes a road accident.",
+     "The pressure an influential Bucharest family applies after a road accident makes personal privilege the subject of a social satire.", "Contemporary Bucharest"),
+    (ITALIAN_NEOREALISM, "rome-open-city-1945", "Rome, Open City", 1945, "IT", "Roberto Rossellini",
+     "https://www.bfi.org.uk/features/rome-open-city-roberto-rossellinis-great-leap-realism-screen", "BFI · Rome, Open City",
+     "The film follows people resisting Nazi occupation in Rome.",
+     "Rossellini’s resistance drama shows how filming in war-damaged Rome helped give Italian neorealism its sense of immediacy.", "Occupied Rome during World War II"),
+    (ITALIAN_NEOREALISM, "bicycle-thieves-1948", "Bicycle Thieves", 1948, "IT", "Vittorio De Sica",
+     "https://www.criterion.com/films/210-bicycle-thieves", "Criterion · Bicycle Thieves",
+     "In postwar Rome, a father and son look for the bicycle the father needs to keep his job.",
+     "Street locations and nonprofessional actors make a father’s search for a bicycle a portrait of postwar unemployment.", "Postwar Rome"),
+    (ITALIAN_NEOREALISM, "umberto-d-1952", "Umberto D.", 1952, "IT", "Vittorio De Sica",
+     "https://www.bfi.org.uk/features/where-begin-vittorio-de-sica", "BFI · Vittorio De Sica",
+     "A retired civil servant struggles to get by in postwar Italy.",
+     "De Sica turns the daily struggles of a pensioner into a close study of postwar hardship.", "Postwar Italy"),
+    (MARVEL, "iron-man-2008", "Iron Man", 2008, "US", "Jon Favreau",
+     "https://www.bfi.org.uk/features/where-begin-marvel-cinematic-universe", "BFI · Marvel Cinematic Universe",
+     "Tony Stark builds a powered suit after being taken captive.",
+     "Tony Stark’s origin sets up the MCU’s Earthbound heroes and its interest in technology and responsibility.", ""),
+    (MARVEL, "avengers-2012", "The Avengers", 2012, "US", "Joss Whedon",
+     "https://www.bfi.org.uk/features/where-begin-marvel-cinematic-universe", "BFI · Marvel Cinematic Universe",
+     "The film brings heroes from earlier MCU titles together for the first time.",
+     "The first Avengers team-up shows how separate stories come together in the same world.", ""),
+    (MARVEL, "guardians-2014", "Guardians of the Galaxy", 2014, "US", "James Gunn",
+     "https://www.bfi.org.uk/features/where-begin-marvel-cinematic-universe", "BFI · Marvel Cinematic Universe",
+     "A group of unlikely allies undertakes a space adventure.",
+     "The Guardians introduce the MCU’s cosmic setting through a self-contained team story.", ""),
+    (SPIDER_MAN, "spider-man-homecoming-2017", "Spider-Man: Homecoming", 2017, "US", "Jon Watts",
+     "https://www.bfi.org.uk/sight-and-sound/reviews/spider-man-homecoming-review-peter-parker-humble-high-school-hero",
+     "Sight and Sound · Spider-Man: Homecoming",
+     "Set in 2016, Peter Parker balances Queens high-school life with proving himself as a street-level hero under Tony Stark’s mentorship.",
+     "Homecoming establishes Tom Holland’s Peter Parker, his mentor bond with Tony Stark, and the street-level tone leading into Brand New Day.",
+     "2016, New York City"),
+    (SPIDER_MAN, "avengers-endgame-2019", "Avengers: Endgame", 2019, "US", "Joe Russo / Anthony Russo",
+     "https://www.bfi.org.uk/sight-and-sound/reviews/avengers-endgame-review-finale-these-heroes-deserve",
+     "Sight and Sound · Avengers: Endgame",
+     "In 2023, the surviving Avengers reverse the five-year Blip, reshaping Peter Parker’s world and ending Tony Stark’s mentorship.",
+     "Endgame supplies the five-year Blip aftermath and Tony Stark’s sacrifice that reshape Peter’s status before Far From Home.",
+     "2023, MCU timeline"),
+    (SPIDER_MAN, "spider-man-far-from-home-2019", "Spider-Man: Far From Home", 2019, "US", "Jon Watts",
+     "https://www.bfi.org.uk/sight-and-sound/reviews/spider-man-far-from-home-review-insider-japery-daffy-humour",
+     "Sight and Sound · Spider-Man: Far From Home",
+     "In 2024, on a European school trip after Endgame, Peter faces Mysterio and sees his secret identity exposed to the public.",
+     "Far From Home bridges Endgame’s grief with the public exposure of Peter Parker’s identity that triggers the crisis in No Way Home.",
+     "2024, Europe"),
+    (SPIDER_MAN, "spider-man-no-way-home-2021", "Spider-Man: No Way Home", 2021, "US", "Jon Watts",
+     "https://www.bfi.org.uk/sight-and-sound/reviews/spider-man-no-way-home-is-satisfying-trip-through-multiverse",
+     "Sight and Sound · Spider-Man: No Way Home",
+     "In 2024, after a botched spell opens the multiverse, Peter chooses to have the world forget Peter Parker so he can protect those he loves.",
+     "As the direct predecessor, No Way Home ends with Peter alone and anonymous in New York, setting the exact starting point for Brand New Day.",
+     "2024, New York City"),
 ]
 
 CONTEXT = [
@@ -82,4 +160,26 @@ RATINGS = {
     "northman-2022": [("IMDb", "audience", 7.0, 10, None, "https://www.imdb.com/title/tt11138512/ratings/"),
                       ("Rotten Tomatoes", "tomatometer", 90, 100, 383, "https://www.rottentomatoes.com/m/the_northman"),
                       ("Metacritic", "metascore", 82, 100, 60, "https://www.metacritic.com/movie/the-northman/?lang=en")],
+}
+
+# TMDB audience snapshots captured on 19 November 2026.
+# Each row contains the movie ID, poster path, score out of ten, and vote count.
+TMDB_SNAPSHOTS = {
+    "medieval-2022": (551271, "/eeUNWsdoiOijOZAMaWFDA5Pb1n8.jpg", 6.84, 569),
+    "joan-1928": (780, "/8OYGtQlO8k9PcOm49apV62eVJQo.jpg", 7.97, 1153),
+    "marketa-1967": (25904, "/bBf0N1kNQGr6btlO9F66VAV1moz.jpg", 7.8, 169),
+    "four-months-2007": (2009, "/acEtvzFPeOQwbzRWncjRLenhnKV.jpg", 7.537, 870),
+    "tuesday-2010": (55151, "/jkNGrNqhbnkEiXktK00TAtaAFkW.jpg", 6.336, 73),
+    "childs-pose-2013": (160118, "/eS7eDNgdk9UHbY8ZY3A5w4aI824.jpg", 6.709, 153),
+    "rome-open-city-1945": (307, "/ijGV4v8JxgbNzgEhqKdzHdaZn8a.jpg", 8.009, 1019),
+    "bicycle-thieves-1948": (5156, "/iPdVqIpmR3bRvOQJPrn4pr2KR3q.jpg", 8.162, 2805),
+    "umberto-d-1952": (833, "/5I7SYsNQmZRZpQ2MAarIQYU9vaX.jpg", 7.9, 780),
+    "iron-man-2008": (1726, "/78lPtwv72eTNqFW9COBYI0dWDJa.jpg", 7.668, 29216),
+    "thor-2011": (10195, "/prSfAi1xGrhLQNxVSUFh61xQ4Qy.jpg", 6.772, 23088),
+    "avengers-2012": (24428, "/RYMX2wcKCBAr24UyPD7xwmjaTn.jpg", 8.085, 40408),
+    "guardians-2014": (118340, "/r7vmZjiyZw9rpJMQJdXpjgiCOk9.jpg", 7.9, 30679),
+    "spider-man-homecoming-2017": (315635, "/c24sv2weTHPsmDa7jEMN0m2P3RT.jpg", 7.332, 24278),
+    "avengers-endgame-2019": (299534, "/jtDv3lCnST0fZRvdYFwR5CVwK2x.jpg", 8.247, 29461),
+    "spider-man-far-from-home-2019": (429617, "/4q2NNj4S5dG2RLF9CpXsej7yXl.jpg", 7.384, 17934),
+    "spider-man-no-way-home-2021": (634649, "/1g0dhYtq4irTY1GPXvft6k4YLjm.jpg", 7.945, 23599),
 }

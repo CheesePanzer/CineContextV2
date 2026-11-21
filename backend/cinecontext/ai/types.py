@@ -19,6 +19,8 @@ class ModelReadiness:
     job_id: str | None = None
     queued_seconds: int | None = None
     remaining_seconds: int | None = None
+    last_confirmed_status: str | None = None
+    last_confirmed_seconds: int | None = None
 
 
 class ModelApiStyle(StrEnum):
@@ -43,6 +45,7 @@ class ModelResponseStatus(StrEnum):
 
 class StructuredOutputType(StrEnum):
     JSON_OBJECT = "json_object"
+    JSON_SCHEMA = "json_schema"
 
 
 class TimelineAxis(StrEnum):
@@ -113,6 +116,7 @@ class ToolCallStatus(StrEnum):
 class EvidenceKind(StrEnum):
     METADATA = "metadata"
     FILM = "film"
+    EDITORIAL = "editorial"
     CONTEXT = "context"
     WEB_EXCERPT = "web_excerpt"
     SEARCH_SUMMARY = "search_summary"

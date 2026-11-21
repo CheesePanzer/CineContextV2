@@ -67,7 +67,7 @@ The model receives numbered references for assessment and guide generation. The 
 | [ratings.py](../backend/cinecontext/ai/research_tools/ratings.py) | Rating provenance, timestamps, and persistence |
 | [editorial.py](../backend/cinecontext/ai/research_tools/editorial.py) | Title-and-year matched curated readings and optional editorial lookup |
 
-A Brave key takes priority for web evidence. The default TACC configuration uses Wikipedia otherwise. Other default configurations use DuckDuckGo with the crawler. TMDB and OMDb are enabled independently. The film readings endpoint verifies run membership in a short database scope, then queries its `FilmReadings` port after releasing that scope.
+A Brave key takes priority for general web evidence. The default TACC configuration uses Wikipedia otherwise. Other default configurations use DuckDuckGo with the crawler. Editorial lookup also supports targeted DuckDuckGo searches independently of the general web provider. The workflow stores matching editorial passages for model assessment and citations. The film readings endpoint verifies run membership and loads stored editorial evidence in a short database scope, then calls its `FilmReadings` port after releasing that scope. TMDB and OMDb are enabled independently.
 
 ## Transactions and persistence
 

@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from typing import Any, Protocol
 from uuid import UUID
 
-from ..ai.types import EvidenceDraft, FilmProjection, ProgressStage
+from ..ai.types import EvidenceDraft, EvidenceRecord, FilmProjection, ProgressStage
 from ..contracts import FurtherReading
 from ..domain import RunStatus
 
@@ -18,7 +18,9 @@ class ReferenceSearch(Protocol):
 
 
 class FilmReadings(Protocol):
-    async def for_film(self, film: FilmProjection) -> list[FurtherReading]: ...
+    async def for_film(
+        self, film: FilmProjection, saved: Sequence[EvidenceRecord] = (), *, live: bool = False
+    ) -> list[FurtherReading]: ...
 
 
 class CurationPersistence(Protocol):

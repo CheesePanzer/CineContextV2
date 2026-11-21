@@ -7,7 +7,7 @@ from openai import APIConnectionError, APIError, APITimeoutError, Authentication
 from ..contracts import Constraints, ParseRequest, RunRequest
 from ..ai.ports import ApplicationModelProvider, ModelUnavailableError
 from ..ai.timeline import history_date_key
-from ..ai.types import EvidenceRecord, FilmProjection, film_title_key
+from ..ai.types import EvidenceKind, EvidenceRecord, FilmProjection, film_title_key
 from ..ai.resume import GuideRetrySnapshot
 from ..domain import CurationRun, RunStatus
 from ..domain.repositories import FilmRepository, RunRepository
@@ -16,6 +16,15 @@ from .ports import FilmReadings, ReferenceSearch, TaccJobControl
 
 TERMINAL = {"completed", "partial", "failed", "interrupted"}
 logger = logging.getLogger(__name__)
+
+
+def is_prerequisite_prompt(prompt: str) -> bool:
+    return bool(re.search(
+        r"\b(?:beforehand|watch\s+before|before\s+watching|before\s+seeing|catch\s+up|prerequisites?|"
+        r"prior\s+viewing|leading\s+(?:into|up\s+to))\b|在那之前|观看之前|看之前",
+        prompt,
+        re.I,
+    ))
 
 
 def reference_setting_query(prompt: str) -> str:
@@ -106,7 +115,7 @@ class ParseApplicationService:
                 if is_reference_placeholder(parsed.constraints.story_period, titles):
                     parsed.constraints.story_period = ""
                 if parsed.reference_match:
-                    if not parsed.constraints.story_period.strip():
+                    if not parsed.constraints.story_period.strip() and not is_prerequisite_prompt(body.prompt):
                         setting = parsed.reference_match.story_setting
                         if parsed.constraints.setting_match == "nearby":
                             setting = reference_search_period(setting)
@@ -276,9 +285,13 @@ class FilmReadingsApplicationService:
         self.scope_factory = scope_factory
         self.readings = readings
 
-    async def get(self, run_id: UUID, film_id: UUID):
+    async def get(self, run_id: UUID, film_id: UUID, *, live: bool = False):
         async with self.scope_factory.create_scope() as scope:
             runs = await scope.resolve(RunApplicationService)
             detail = await runs.get_film(run_id, film_id)
             film = FilmProjection.model_validate(detail["film"])
-        return {"readings": await self.readings.for_film(film)}
+            saved = [
+                EvidenceRecord.model_validate(item) for item in detail["evidence"]
+                if item["kind"] == EvidenceKind.EDITORIAL and str(item.get("film_id")) == str(film.id)
+            ]
+        return {"readings": await self.readings.for_film(film, saved, live=live)}

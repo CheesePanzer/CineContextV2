@@ -15,7 +15,7 @@ from alcedo import ConflictError, NotFoundError, Options, ServiceUnavailableErro
 from pydantic import BaseModel
 from starlette.testclient import TestClient
 from cinecontext.ai.curation import CurationService
-from cinecontext.ai.openai_model import ModelOutputValidationError, ModelResponse, OpenAIModel
+from cinecontext.ai.openai_model import ModelOutputValidationError, ModelResponse, OpenAIModel, OpenAIModelProvider
 from cinecontext.ai.tacc_transport import TaccSdkTransport
 from cinecontext.ai.nodes import AssessNode, DiscoverNode, WorkflowOperations
 from cinecontext.application.services import FilmReadingsApplicationService, ParseApplicationService, RunApplicationService
@@ -34,9 +34,9 @@ from cinecontext.ai.types import (
     ModelReadiness,
 )
 from cinecontext.ai.research_tools import create_research_tools
-from cinecontext.ai.research_tools.crawler import VisibleHTMLParser, validate_public_url
+from cinecontext.ai.research_tools.crawler import VisibleHTMLParser, WebCrawler, validate_public_url
 from cinecontext.ai.research_tools.duckduckgo import DuckDuckGoHTMLParser
-from cinecontext.ai.research_tools.editorial import WebFilmReadings, article_url, curated_candidates
+from cinecontext.ai.research_tools.editorial import EditorialResearch, WebFilmReadings, article_url, curated_candidates
 from cinecontext.ai.research_tools.tmdb import TmdbMetadataProvider
 from cinecontext.ai.guide_validation import GuideValidator
 from cinecontext.ai.guide_draft import GuideDraft
@@ -159,6 +159,30 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.reference_match, found)
                 self.assertEqual(bool(result.clarification), found is None)
                 references.search.assert_awaited_once_with(model_queries or [f"{title} setting"])
+
+    async def test_prerequisite_prompt_keeps_reference_match_without_imposing_sequel_setting(self):
+        prompt = "I'm getting ready to watch Spider-Man: Brand New Day. Recommend four films to watch beforehand."
+        match = ReferenceMatch(
+            title="Spider-Man: Brand New Day", story_setting="New York City, 2026",
+            source_title="Wikipedia", source_url="https://en.wikipedia.org/wiki/Spider-Man:_Brand_New_Day",
+        )
+        parsed = ParsedRequest(
+            constraints=Constraints(topic=prompt, theme="MCU Spider-Man prerequisites", story_period="",
+                                    setting_match="strict"),
+            reference_queries=["Spider-Man: Brand New Day"],
+        )
+        model = SimpleNamespace(
+            parse=AsyncMock(return_value=parsed),
+            resolve_reference=AsyncMock(return_value=match),
+            close=AsyncMock(),
+        )
+        references = SimpleNamespace(search=AsyncMock(return_value=[sample_evidence(None)]))
+        result = await ParseApplicationService(SimpleNamespace(create=lambda: model), references).parse(
+            ParseRequest(prompt=prompt),
+        )
+        self.assertEqual(result.reference_match, match)
+        self.assertEqual(result.constraints.story_period, "")
+        self.assertEqual(result.clarification, "")
 
     def test_study_payload_has_exact_external_keys(self):
         film = sample_film()
@@ -390,20 +414,25 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         film = sample_film()
         run_id = uuid4()
         readings = SimpleNamespace(for_film=AsyncMock(return_value=[]))
-        runs = SimpleNamespace(get_film=AsyncMock(return_value={"film": film.model_dump()}))
+        review = sample_evidence(film.id).model_copy(update={"kind": EvidenceKind.EDITORIAL})
+        runs = SimpleNamespace(get_film=AsyncMock(return_value={
+            "film": film.model_dump(), "evidence": [review.model_dump(), sample_evidence(None).model_dump()],
+        }))
         scope = SimpleNamespace(resolve=AsyncMock(return_value=runs))
         manager = AsyncMock()
         manager.__aenter__.return_value = scope
         factory = SimpleNamespace(create_scope=lambda: manager)
 
-        async def search(selected):
+        async def search(selected, saved, *, live):
+            self.assertTrue(live)
             manager.__aexit__.assert_awaited_once()
             self.assertEqual(selected.id, film.id)
+            self.assertEqual(saved, [review])
             return []
 
         readings.for_film.side_effect = search
         service = FilmReadingsApplicationService(factory, readings)
-        self.assertEqual(await service.get(run_id, film.id), {"readings": []})
+        self.assertEqual(await service.get(run_id, film.id, live=True), {"readings": []})
         runs.get_film.assert_awaited_once_with(run_id, film.id)
 
         readings.for_film.reset_mock()
@@ -437,6 +466,20 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         ctx.constraints.setting_match = "strict"
         ctx.evidence = [source.model_copy(update={"film_id": None, "body": decision["setting_quote"]})]
         self.assertEqual((await node._assess(ctx, [film]))[film.id].status, DecisionStatus.NEEDS_EVIDENCE)
+
+    async def test_rejected_film_without_topic_evidence_stays_rejected(self):
+        ctx = context(CurationState.ASSESS)
+        film = sample_film()
+        metadata = sample_evidence(film.id).model_copy(update={"kind": EvidenceKind.METADATA})
+        ctx.evidence = [metadata]
+        decision = {
+            "film_id": film.id, "status": "rejected", "reason": "Unrelated documentary.",
+            "evidence_ids": [metadata.id],
+        }
+        operations = SimpleNamespace(logged=AsyncMock(return_value=Assessment(decisions=[decision])))
+        result = (await AssessNode(operations)._assess(ctx, [film]))[film.id]
+        self.assertEqual(result.status, DecisionStatus.REJECTED)
+        self.assertEqual(result.next_query, "")
 
     def test_transition_requires_exactly_one_match(self):
         ctx = context()
@@ -782,6 +825,21 @@ class CandidateDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             details = await provider._lookup_details(FilmHint(title="The Autobiography of Nicolae Ceaușescu", year=2010))
         self.assertEqual(details["poster_path"], "/correct.jpg")
 
+    async def test_tmdb_lookup_matches_leading_articles_and_disambiguates_duplicates(self):
+        async def handler(request):
+            if request.url.path.endswith("/search/movie"):
+                return httpx.Response(200, json={"results": [
+                    {"id": 1001, "title": "A City of Sadness", "release_date": "1989-09-07", "vote_count": 161},
+                    {"id": 2002, "title": "City of Sadness", "release_date": "1989-01-01", "vote_count": 0},
+                ]})
+            self.assertTrue(request.url.path.endswith("/movie/1001"))
+            return httpx.Response(200, json={"id": 1001, "title": "A City of Sadness", "release_date": "1989-09-07"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            provider = TmdbMetadataProvider(None, http, TmdbOptions(access_token="test"), None, None)
+            details = await provider._lookup_details(FilmHint(title="City of Sadness", year=1989))
+        self.assertEqual(details["id"], 1001)
+
     async def test_editorial_links_use_verified_title_and_release_identity(self):
         constraints = Constraints(topic="Medieval film", theme="Feudal power",
                                   story_period="1403 Bohemia", release_from=1956, release_to=2000)
@@ -807,6 +865,103 @@ class CandidateDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(year=year):
                 readings = await service.for_film(film.model_copy(update={"year": year}))
                 self.assertEqual([(row.title, row.author) for row in readings], [(f"Midway ({year})", author)])
+
+    async def test_editorial_search_without_brave_fetches_film_passage_in_festival_report(self):
+        film = sample_film()
+        good_url = "https://www.sensesofcinema.com/2001/festival-reports/spring-festival/"
+        wrong_url = "https://www.sensesofcinema.com/2001/festival-reports/another-festival/"
+        looked_up = []
+
+        async def handler(request):
+            if request.url.path == "/wp-json/wp/v2/search":
+                return httpx.Response(200, json=[])
+            if request.url.host == "html.duckduckgo.com":
+                if "site:sensesofcinema.com" not in request.url.params["q"]:
+                    return httpx.Response(200, headers={"content-type": "text/html"}, text="<html></html>")
+                return httpx.Response(200, headers={"content-type": "text/html"}, text=f"""
+                    <a class="result__a" href="{wrong_url}">A different festival</a>
+                    <p class="result__snippet">A roundup of films and discussions from the festival.</p>
+                    <a class="result__a" href="{good_url}">Spring Festival Report</a>
+                    <p class="result__snippet">An overview of films shown at the festival.</p>
+                """)
+            looked_up.append(str(request.url))
+            text = ("Test Film (2000) by Director examines grief through its patient compositions. "
+                    "The critic pays particular attention to the quiet final scene.") if str(request.url) == good_url else (
+                    "Test Film (2019) by Another Filmmaker is an entirely different production with a similar title."
+                )
+            return httpx.Response(200, headers={"content-type": "text/html"},
+                                  text=f"<title>Festival report</title><article>{text}</article>")
+
+        async def resolver(_):
+            return {"93.184.216.34"}
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            tools = create_research_tools(SimpleNamespace(), client, ToolsOptions(), resolver)
+            evidence = await tools.search_editorial(film, focus="grief and composition")
+        self.assertEqual(looked_up, [wrong_url, good_url])
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual((evidence[0].source_url, evidence[0].film_id, evidence[0].kind),
+                         (good_url, film.id, EvidenceKind.EDITORIAL))
+        self.assertIn("patient compositions", evidence[0].body)
+
+    async def test_online_readings_follow_publisher_references_without_an_api_key(self):
+        film = sample_film().model_copy(update={"original_title": "Le Film Test"})
+        criterion = "https://www.criterion.com/current/posts/123-test-film"
+        bfi = "https://www.bfi.org.uk/sight-and-sound/reviews/test-film"
+        senses = "https://www.sensesofcinema.com/2001/feature-articles/the-long-take/"
+        requests = []
+
+        def respond(request):
+            url = str(request.url)
+            requests.append(url)
+            if request.url.host == "en.wikipedia.org":
+                return httpx.Response(200, json={"query": {"pages": [{
+                    "title": "Test Film", "extract": "Test Film is a 2000 film.",
+                    "extlinks": [{"url": criterion}, {"url": bfi}],
+                }]}})
+            if url == criterion:
+                return httpx.Response(403)
+            if url == bfi:
+                return httpx.Response(200, text=(
+                    "<title>Test Film reviewed</title><article>Test Film (2000) uses long dialogue scenes "
+                    "to build a portrait of an isolated community.</article>"
+                ), headers={"content-type": "text/html"})
+            if request.url.path.endswith("/search") and request.url.params["search"] == film.original_title:
+                return httpx.Response(200, json=[
+                    {"id": 9, "url": "https://www.sensesofcinema.com/2001/world-poll/yearly/", "title": "2001 World Poll"},
+                    {"id": 10, "url": senses, "title": "The long take"},
+                ])
+            if request.url.path.endswith("/posts/10"):
+                return httpx.Response(200, json={"content": {"rendered": (
+                    "<p>The festival featured several other directors and works from around the world "
+                    "during this edition before the screening of Le Film Test (2000), which uses long takes "
+                    "to let a difficult conversation unfold in real time.</p>"
+                )}})
+            return httpx.Response(200, json=[])
+
+        options = ToolsOptions(duckduckgo={"enabled": False}, wikipedia_enabled=True)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            editorial = EditorialResearch(http, options, WebCrawler(http, options.crawler))
+            self.assertEqual(await editorial.find(film, live=False), [])
+            self.assertEqual(requests, [])
+            rows = await editorial.find(film)
+            self.assertEqual({row.reading.origin for row in rows}, {"web", "reference"})
+            excerpts = {str(row.reading.url): row.reading.excerpt for row in rows if row.reading.excerpt}
+            self.assertEqual(excerpts[bfi],
+                             "Test Film (2000) uses long dialogue scenes to build a portrait of an isolated community.")
+            self.assertIn("Le Film Test (2000)", excerpts[senses])
+            self.assertFalse(any("/posts/9?" in url for url in requests))
+            tools = create_research_tools(SimpleNamespace(), http, options)
+            evidence = await tools.search_editorial(film)
+            self.assertEqual([row.source_url for row in evidence], [bfi, senses])
+
+    async def test_confirmed_romanian_readings_are_available_without_a_search_provider(self):
+        options = ToolsOptions(duckduckgo={"enabled": False})
+        film = sample_film().model_copy(update={"title": "4 Months, 3 Weeks and 2 Days", "year": 2007})
+        tools = create_research_tools(SimpleNamespace(), SimpleNamespace(), options)
+        rows = await tools.search_editorial(film)
+        self.assertEqual({row.locator for row in rows}, {"BFI / Sight and Sound", "Criterion", "Senses of Cinema"})
+        self.assertTrue(all(row.kind == EvidenceKind.EDITORIAL and row.film_id == film.id for row in rows))
 
 
 class ObservabilityTests(unittest.IsolatedAsyncioTestCase):
@@ -952,6 +1107,35 @@ class StructuredModelOutputTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await model.close()
 
+    async def test_assess_compacts_large_evidence_payloads_for_context_budget(self):
+        model = OpenAIModel(ModelOptions(
+            api_key="test", model_id="test",
+        ), LoggingOptions(capture_model_responses=False))
+        films = [sample_film().model_copy(update={"id": uuid4(), "title": f"Film {index}"}) for index in range(10)]
+        long_body = ("word " * 500).strip()
+        evidence = [
+            sample_evidence(film.id).model_copy(update={"id": uuid4(), "body": long_body})
+            for film in films for _ in range(4)
+        ]
+
+        async def reply(system, payload, schema):
+            request = json.loads(payload)
+            self.assertLess(len(payload), 26000)
+            for source in request["evidence"]:
+                self.assertIn(source["body"], long_body)
+                self.assertNotIn("source_url", source)
+            return ModelResponse(json.dumps({"decisions": [
+                {"film": index, "status": "rejected", "reason": "No match", "sources": []}
+                for index in range(1, len(films) + 1)
+            ]}), "stop")
+
+        model._chat_complete = AsyncMock(side_effect=reply)
+        try:
+            assessment = await model.assess(Constraints(topic="Test", theme="Test"), films, evidence)
+            self.assertEqual(len(assessment.decisions), 10)
+        finally:
+            await model.close()
+
     async def test_invalid_json_is_retried_then_succeeds(self):
         model = OpenAIModel(ModelOptions(
             api_key="test", model_id="test", structured_output_retries=1,
@@ -1021,6 +1205,31 @@ class StructuredModelOutputTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TaccModelTests(unittest.IsolatedAsyncioTestCase):
+    async def test_status_probe_keeps_recent_confirmation_only_for_the_same_job(self):
+        jobs = SimpleNamespace(job_id="42")
+        provider = OpenAIModelProvider(Options(ModelOptions(mode="tacc", tacc_job_id="42")), Options(LoggingOptions()), jobs)
+        probe = AsyncMock(side_effect=[
+            ModelReadiness("ready", "42", remaining_seconds=120),
+            ModelReadiness("unavailable", "42"),
+            ModelReadiness("unavailable", "43"),
+            ModelReadiness("stopped", "43"),
+        ])
+        clock = SimpleNamespace(now=0)
+        with patch("cinecontext.ai.openai_model.monotonic", new=lambda: clock.now), patch(
+            "cinecontext.ai.openai_model.TaccSdkTransport", return_value=SimpleNamespace(readiness=probe),
+        ):
+            first, concurrent = await asyncio.gather(provider.readiness(), provider.readiness())
+            self.assertEqual((first.status, concurrent.status, probe.await_count), ("ready", "ready", 1))
+            clock.now = 15
+            failed = await provider.readiness()
+            self.assertEqual((failed.status, failed.last_confirmed_status, failed.last_confirmed_seconds),
+                             ("unavailable", "ready", 15))
+            jobs.job_id = "43"
+            other_job = await provider.readiness()
+            self.assertIsNone(other_job.last_confirmed_status)
+            clock.now = 30
+            self.assertEqual((await provider.readiness()).status, "stopped")
+
     async def test_job_clock_transitions_from_queue_to_running_allocation(self):
         transport = TaccSdkTransport("tcloud", "42", 30)
         transport.command = AsyncMock(side_effect=[
@@ -1068,6 +1277,30 @@ class TaccModelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.constraints.theme, "History")
             finally:
                 await model.close()
+
+    async def test_sdk_guide_requests_schema_with_the_exact_number_of_films(self):
+        film = sample_film()
+        evidence = sample_evidence(film.id)
+        model = OpenAIModel(ModelOptions(mode="tacc", tacc_job_id=42), LoggingOptions())
+        content = {"title": "Guide", "introduction": "An introduction.", "viewing_order": [1],
+                   "film_guides": [{"film": 1, "reason": {"title": "Why it fits", "text": "A reason.", "sources": [1]}}]}
+        try:
+            model.client.chat.completions.create = AsyncMock(return_value=SimpleNamespace(
+                usage=None, choices=[SimpleNamespace(
+                    finish_reason="stop", message=SimpleNamespace(content=json.dumps(content)),
+                )],
+            ))
+            guide = await model.generate(Constraints(topic="Test Film", theme="History"), [film], [evidence])
+            request = model.client.chat.completions.create.call_args.kwargs["response_format"]
+            self.assertEqual(request["type"], "json_schema")
+            shape = request["json_schema"]["schema"]
+            self.assertFalse(shape["additionalProperties"])
+            for field in ("film_guides", "viewing_order"):
+                self.assertEqual(shape["properties"][field]["minItems"], 1)
+                self.assertEqual(shape["properties"][field]["maxItems"], 1)
+            self.assertEqual(guide.film_guides[0].reason.evidence_ids, [evidence.id])
+        finally:
+            await model.close()
 
     async def test_running_job_tolerates_a_failed_ready_marker_read(self):
         transport = TaccSdkTransport("tcloud", "42", 30)
@@ -1156,6 +1389,38 @@ class TaccRestartTests(unittest.IsolatedAsyncioTestCase):
                 await jobs._submit_configured_job(SimpleNamespace(command=submit)),
                 b"Submitted batch job 43\n",
             )
+
+    async def test_gpu_memory_failure_temporarily_excludes_node_until_cooldown_expires(self):
+        jobs = TaccJobs(Options(ModelOptions(mode="tacc", tacc_job_id="42")))
+        seen_configs = []
+
+        async def command(*args, timeout, cwd=None):
+            if args == ("cat", "slurm_log/cinecontext-qwen-42.log"):
+                return (
+                    b"CUDA_VISIBLE_DEVICES=0,1\n"
+                    b"0, 4847\n"
+                    b"1, 15311\n"
+                    b"The allocated GPUs do not have enough free memory to start Qwen.\n"
+                    b"srun: error: 10-0-4-10: task 0: Exited with exit code 1\n"
+                )
+            self.assertEqual(args, ("submit",))
+            seen_configs.append((cwd / "tuxiv.conf").read_text())
+            return b"Submitted batch job 43\n"
+
+        transport = SimpleNamespace(command=command)
+        with patch.dict(os.environ, {"CINECONTEXT_TACC_EXCLUDE_NODES": ""}), patch(
+            "cinecontext.infrastructure.tacc_jobs.monotonic", side_effect=[100.0, 100.0, 2000.0],
+        ):
+            self.assertEqual(
+                await jobs._submit_configured_job(transport, failed_job_id="42"),
+                b"Submitted batch job 43\n",
+            )
+            self.assertIn("    - exclude=10-0-4-10\n", seen_configs[0])
+            self.assertEqual(
+                await jobs._submit_configured_job(transport),
+                b"Submitted batch job 43\n",
+            )
+            self.assertNotIn("exclude=10-0-4-10", seen_configs[1])
 
     async def test_restart_is_shared_by_concurrent_requests_and_updates_the_saved_job(self):
         jobs = TaccJobs(Options(ModelOptions(mode="tacc", tacc_job_id="42")))

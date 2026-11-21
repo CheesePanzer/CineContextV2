@@ -38,6 +38,26 @@ class WikipediaSearchProvider:
                 evidence.append(self._evidence(page, body, None, include_setting))
         return evidence
 
+    async def film_reference_urls(self, film: FilmProjection) -> list[str]:
+        titles = {film.title, film.original_title} - {""}
+        variants = list(dict.fromkeys(
+            candidate for title in sorted(titles)
+            for candidate in (title, f"{title} ({film.year} film)", f"{title} (film)")
+        ))
+        aliases = {film_title_key(title) for title in titles}
+        response = await self.http.get(API_URL, headers=HEADERS, params={
+            "action": "query", "titles": "|".join(variants), "redirects": 1,
+            "prop": "extracts|extlinks", "exintro": 1, "explaintext": 1,
+            "exlimit": "max", "ellimit": "max", "format": "json", "formatversion": 2,
+        }, timeout=5)
+        response.raise_for_status()
+        for page in response.json().get("query", {}).get("pages", []):
+            heading = re.sub(r"\s*\([^)]*\)\s*$", "", page["title"])
+            intro = page.get("extract", "")[:650]
+            if film_title_key(heading) in aliases and str(film.year) in intro and "film" in intro.lower():
+                return [link["url"] for link in page.get("extlinks", [])]
+        return []
+
     async def _find_pages(self, query: str) -> list[dict]:
         response = await self.http.get(
             API_URL,

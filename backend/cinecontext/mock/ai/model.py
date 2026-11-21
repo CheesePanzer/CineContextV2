@@ -8,14 +8,33 @@ from ...ai.types import (
     ResearchTimelineAxis,
     TimelineAxis,
 )
-from ..demo_data import MEMORY, NORSE, SURVEILLANCE
+from ..demo_data import (
+    ITALIAN_NEOREALISM,
+    MARVEL,
+    MEDIEVAL,
+    MEMORY,
+    NORSE,
+    ROMANIAN_NEW_WAVE,
+    SPIDER_MAN,
+    SURVEILLANCE,
+)
 
 THEMES = {
+    MEDIEVAL: ("kingdom come: deliverance ii", "medieval", "middle ages"),
+    ROMANIAN_NEW_WAVE: ("romanian new wave",),
+    ITALIAN_NEOREALISM: ("italian neorealism", "italian neo realism", "italian neo-realism"),
+    SPIDER_MAN: ("spider-man: brand new day", "brand new day", "spider-man", "spiderman"),
+    MARVEL: ("marvel cinematic universe", "marvel films", "mcu"),
     NORSE: ("北欧神话", "诸神黄昏", "norse", "ragnarök", "ragnarok", "valhalla"),
     SURVEILLANCE: ("监控", "监听", "surveillance", "stasi"),
     MEMORY: ("政治记忆", "罗马尼亚革命", "romanian revolution", "齐奥塞斯库", "political memory", "ceausescu", "ceaus"),
 }
 RESEARCH_TITLES = {
+    MEDIEVAL: "Medieval European History on Film",
+    ROMANIAN_NEW_WAVE: "Films of the Romanian New Wave",
+    ITALIAN_NEOREALISM: "Italian Neorealism on Film",
+    SPIDER_MAN: "Spider-Man: Brand New Day Prerequisites",
+    MARVEL: "Building the Marvel Cinematic Universe",
     NORSE: "Norse Mythology on Film",
     SURVEILLANCE: "State Surveillance on Film",
     MEMORY: "Romanian Political Memory on Film",
@@ -48,7 +67,7 @@ class MockModel:
             counts = dict(zip(("one", "two", "three", "four", "five", *"一二两三四五"), (1, 2, 3, 4, 5, 1, 2, 2, 3, 4, 5)))
             count = int(value) if value.isdecimal() else counts[value]
         region = next((name for name in REGIONS if name in prompt.replace("北欧神话", "")), "")
-        if not region:
+        if not region and theme not in {MEDIEVAL, ROMANIAN_NEW_WAVE, ITALIAN_NEOREALISM, SPIDER_MAN, MARVEL}:
             region = next((label for keyword, label in (("europe", "欧洲"), ("romanian", "罗马尼亚"),
                           ("german", "德国"), ("american", "美国")) if keyword in lower), "")
         year_range = re.search(r"((?:18|19|20)\d\d)\s*(?:年\s*)?(?:至|到|[-–—]|to)\s*((?:18|19|20)\d\d)", lower)
@@ -72,11 +91,12 @@ class MockModel:
         elif "上映时间线" in prompt or "release timeline" in lower:
             axis = TimelineAxis.RELEASE
         if not theme:
-            clarification = "Demo mode covers Norse mythology, state surveillance, and Romanian political memory."
+            clarification = "Try one of the demo topics, such as Italian neorealism or Spider-Man: Brand New Day."
         return ParsedRequest.model_validate({
             "constraints": {"topic": prompt, "theme": theme, "research_title": RESEARCH_TITLES.get(theme, ""),
                             "count": count, "region": region,
-                            "release_from": start, "release_to": end, "story_period": story_period, "axis": axis},
+                            "release_from": start, "release_to": end, "story_period": story_period, "axis": axis,
+                            "setting_match": "nearby" if theme == MEDIEVAL and not story_period else "strict"},
             "clarification": clarification,
         })
 
@@ -128,7 +148,7 @@ class MockModel:
         events = []
         edges = []
         for film in films:
-            year = re.search(r"(?:18|19|20)\d\d", film.story)
+            year = re.search(r"(?<!\d)[12]\d{3}(?!\d)", film.story)
             if year and film.slug in by_locator:
                 events.append({"id": film.slug, "axis": ResearchTimelineAxis.STORY, "label": film.title,
                                "period": film.story, "sort_year": int(year[0]),
@@ -167,14 +187,16 @@ class MockModel:
         common = [{"title": item.source_title.split(" · ")[-1], "text": item.body, "evidence_ids": [item.id]}
                   for item in evidence if item.kind == EvidenceKind.CONTEXT]
         guides = []
+        if constraints.theme in {MARVEL, SPIDER_MAN}:
+            films = sorted(films, key=lambda film: (film.year, film.slug))
         for film in films:
             source = next(item for item in evidence if item.film_id == film.id and item.kind == EvidenceKind.FILM)
-            reason = {"title": "Why it fits", "text": film.reason, "evidence_ids": [source.id]}
+            review = next((item for item in evidence if item.film_id == film.id and item.kind == EvidenceKind.EDITORIAL), None)
+            reason = {"title": "Why it fits", "text": film.reason, "evidence_ids": [(review or source).id]}
             primer = {"title": "Before you watch", "text": source.body, "evidence_ids": [source.id]}
             guides.append({"film_id": film.id, "reason": reason, "primer": [primer], "background": []})
-        topic = {NORSE: "Norse Mythology on Screen", SURVEILLANCE: "State Surveillance on Screen", MEMORY: "Political Memory in Romanian Cinema"}
         return Guide.model_validate({
-            "title": topic.get(constraints.theme, constraints.topic),
+            "title": RESEARCH_TITLES.get(constraints.theme, constraints.topic),
             "introduction": "Compare how the films approach the same theme through their settings, sources, and adaptations.",
             "common_primer": common[:5], "film_guides": guides,
             "viewing_order": [film.id for film in films],

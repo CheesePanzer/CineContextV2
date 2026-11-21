@@ -21,13 +21,18 @@ This design bounds retries, preserves evidence provenance, and leaves provider s
 | `lookup_movie` | `FilmHint` → `FilmProjection \| None` | Discovery, TMDB when configured |
 | `search_passages` | Query and optional film UUID → evidence drafts | Discovery and follow-up, PostgreSQL full-text search |
 | `search_web` | Query and optional film UUID → evidence drafts | Discovery and follow-up, selected web provider |
+| `search_editorial` | Verified film and optional focus → editorial evidence drafts | Discovery and follow-up, curated readings and targeted publication search |
 | `lookup_ratings` | `FilmProjection` → ratings | Ratings stage, OMDb when configured and IMDb ID is available |
 
 TMDB verifies a single title and optional year match before persisting metadata, releases, and the audience rating. Passage search uses TSVECTOR, a GIN index, and `websearch_to_tsquery`. It targets film-specific passages when given a film UUID, or shared context when the film is omitted.
 
 Web search uses Brave LLM Context when configured. The other defaults are Wikipedia for TACC and DuckDuckGo for the standard configuration. DuckDuckGo can use the crawler to extract text, with a search snippet fallback. The crawler follows public HTTP(S) locations, checks redirect targets and DNS, bounds the response and page counts, and reads supported content types without executing JavaScript. A transient upstream error can be retried within the configured time budget.
 
-Rating lookup is ancillary. Optional OMDb returns IMDb, Rotten Tomatoes, and Metacritic values for the verified IMDb ID. TMDB scores arrive with metadata. Film criticism is served through the separate `FilmReadings` port when users open a result. Curated entries match normalized title and release year. Optional searches seek film-specific Criterion, BFI, and Senses of Cinema links. The app presents verified summaries where available and links to the publisher for the full text.
+Rating lookup is ancillary. Optional OMDb returns IMDb, Rotten Tomatoes, and Metacritic values for the verified IMDb ID. TMDB scores arrive with metadata.
+
+Editorial search checks film titles against their release year or director. It queries Senses of Cinema directly, follows publisher references from a matched Wikipedia film page, and tries the configured search providers. These paths support article discovery without a Brave key. An editorial passage must match the selected film before it enters the evidence bundle for Qwen. Qwen can request a focused follow-up when it needs more evidence and cites relevant critical observations in the guide.
+
+The film dialog displays saved articles first and looks for missing publishers in the background. It labels catalogue entries, research sources, and online results, and displays short excerpts when available. When the app can confirm a Criterion reference but publisher access is blocked, the dialog displays the link with an access label. Only readable evidence is passed to Qwen.
 
 ## Model methods
 
@@ -40,6 +45,7 @@ Rating lookup is ancillary. Optional OMDb returns IMDb, Rotten Tomatoes, and Met
 | `generate` | A guide with claim-level source references |
 
 The production adapter validates JSON from an OpenAI-compatible API. The demo supplies deterministic responses to the same interface.
+For guide generation through the course TACC SDK, the adapter also requests a JSON schema with the exact number of selected films. The normal guide validation checks film coverage and citations before publication.
 
 ## Execution and audit
 

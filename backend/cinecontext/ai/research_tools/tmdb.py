@@ -77,7 +77,7 @@ class TmdbMetadataProvider:
         keyword_matches = await asyncio.gather(*(find_keyword(term) for term in terms), return_exceptions=True)
         if theme and terms[0] == theme and isinstance(keyword_matches[0], list) and keyword_matches[0]:
             keyword_matches = keyword_matches[:1]
-        filters = {"include_adult": "false", "sort_by": "popularity.desc"}
+        filters = {"include_adult": "false", "sort_by": "popularity.desc", "vote_count.gte": "10"}
         if constraints.release_from:
             filters["primary_release_date.gte"] = f"{constraints.release_from}-01-01"
         if constraints.release_to:
@@ -116,29 +116,62 @@ class TmdbMetadataProvider:
             return None
         return await self._save_movie(data, release, kind)
 
+    @staticmethod
+    def _title_keys(value: str) -> set[str]:
+        key = film_title_key(value)
+        if not key:
+            return set()
+        stripped = re.sub(r"^(?:a|an|the)\s+", "", key)
+        return {key, stripped} if stripped else {key}
+
     async def _lookup_details(self, hint: FilmHint) -> dict | None:
         if not self.options.enabled:
             return None
+        target_keys = self._title_keys(hint.title)
+
+        def match_results(payload: dict) -> list[dict]:
+            return [
+                item
+                for item in payload.get("results", [])[: self.options.search_result_limit]
+                if target_keys & (
+                    self._title_keys(str(item.get("title", "")))
+                    | self._title_keys(str(item.get("original_title", "")))
+                )
+            ]
+
         search = await self._get(
             "search/movie",
             query=hint.title,
             include_adult="false",
             **({"year": hint.year} if hint.year else {}),
         )
-        results = [
-            item
-            for item in search.get("results", [])[: self.options.search_result_limit]
-            if film_title_key(hint.title) in {
-                film_title_key(str(item.get("title", ""))),
-                film_title_key(str(item.get("original_title", ""))),
-            }
-        ]
-        matching_year = [item for item in results if str(item.get("release_date", ""))[:4] == str(hint.year)]
-        candidates = matching_year or results
-        if len(candidates) != 1:
+        results = match_results(search)
+        if not results and hint.year:
+            fallback = await self._get("search/movie", query=hint.title, include_adult="false")
+            results = match_results(fallback)
+        if not results:
             return None
+        matching_year = [item for item in results if str(item.get("release_date", ""))[:4] == str(hint.year)]
+        if not matching_year and hint.year:
+            matching_year = [
+                item for item in results
+                if (year := str(item.get("release_date", ""))[:4]).isdecimal()
+                and abs(int(year) - hint.year) <= 1
+            ]
+        candidates = matching_year or results
+        if len(candidates) == 1:
+            chosen = candidates[0]
+        else:
+            ranked = sorted(
+                candidates,
+                key=lambda item: (int(item.get("vote_count") or 0), float(item.get("popularity") or 0.0)),
+                reverse=True,
+            )
+            if int(ranked[0].get("vote_count") or 0) <= int(ranked[1].get("vote_count") or 0):
+                return None
+            chosen = ranked[0]
         data = await self._get(
-            f"movie/{int(candidates[0]['id'])}", append_to_response="credits,external_ids,release_dates"
+            f"movie/{int(chosen['id'])}", append_to_response="credits,external_ids,release_dates"
         )
         if hint.year:
             release, _ = self._catalog_release(data)

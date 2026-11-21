@@ -80,6 +80,8 @@ class FurtherReading(BaseModel):
     url: HttpUrl
     summary: str | None = None
     author: str | None = None
+    origin: Literal["catalogue", "research", "web", "reference"] | None = None
+    excerpt: str | None = None
 
 
 class FilmHint(BaseModel):

@@ -25,6 +25,7 @@ from .types import (
     EvidenceKind,
     EvidenceRecord,
     FollowUpRequest,
+    ModelMode,
     OperationName,
     ProgressStage,
     Relevance,
@@ -94,6 +95,7 @@ class WorkflowOperations:
                 OperationName.LOOKUP_MOVIE: "TMDB metadata could not be verified for some candidates.",
                 OperationName.LOOKUP_RATINGS: "External ratings are unavailable for some films.",
                 OperationName.SEARCH_WEB: "Some film source lookups could not be completed.",
+                OperationName.SEARCH_EDITORIAL: "Some film editorial lookups could not be completed.",
                 OperationName.SEARCH_WEB_CONTEXT: "Some historical context lookups could not be completed.",
                 OperationName.SEARCH_WEB_FOLLOW_UP: "Some follow-up source lookups could not be completed.",
             }.get(operation, "Some external sources are unavailable.")
@@ -261,18 +263,18 @@ class DiscoverNode:
             ctx, OperationName.SEARCH_PASSAGES,
             lambda: ctx.tools.search_passages(ctx.require_plan().query, film_id)
         )
-        external = await self.operations.logged(
+        external = await self.operations.optional(
             ctx, OperationName.SEARCH_EDITORIAL,
-            lambda: ctx.tools.search_editorial(film),
-        ) if ctx.tools.metadata_enabled else []
-        if not rows and not external and ctx.tools.web_enabled:
+            lambda: ctx.tools.search_editorial(film, live=ctx.model.mode != ModelMode.MOCK),
+        )
+        if not rows and ctx.tools.web_enabled:
             await self.operations.advance(
                 ctx, ProgressStage.SEARCHING,
-                f"Stored sources were insufficient for “{film.title}”; searching public web sources."
+                f"Checking public background sources for “{film.title}”."
             )
             query = f"\"{film.original_title}\" {film.year} film synopsis historical setting"
             rows = await self.operations.optional(ctx, OperationName.SEARCH_WEB, lambda: ctx.tools.search_web(query, film_id))
-        await self.operations.capture(ctx, [*(rows or []), *external])
+        await self.operations.capture(ctx, [*(rows or []), *(external or [])])
 
 
 class AssessNode:
@@ -347,7 +349,7 @@ class AssessNode:
             has_topic_evidence = any(
                 by_id[ref].kind != EvidenceKind.METADATA for ref in item.evidence_ids
             )
-            if not has_topic_evidence:
+            if item.status != DecisionStatus.REJECTED and not has_topic_evidence:
                 item = item.model_copy(update={
                     "status": DecisionStatus.NEEDS_EVIDENCE,
                     "next_query": f'"{film.original_title}" {film.year} film {ctx.constraints.theme}',
@@ -391,6 +393,13 @@ class FollowUpNode:
             lambda: search(query, film_id),
         )
         await self.operations.capture(ctx, rows or [])
+        if ctx.model.mode != ModelMode.MOCK and not any(
+            item.film_id == film_id and item.kind == EvidenceKind.EDITORIAL for item in ctx.evidence
+        ):
+            reviews = await self.operations.optional(
+                ctx, OperationName.SEARCH_EDITORIAL, lambda: ctx.tools.search_editorial(film, focus=query),
+            )
+            await self.operations.capture(ctx, reviews or [])
         if ctx.tools.web_enabled:
             context_rows = await self.operations.optional(
                 ctx, OperationName.SEARCH_WEB_CONTEXT,

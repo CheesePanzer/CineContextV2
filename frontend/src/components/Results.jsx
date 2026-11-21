@@ -15,15 +15,20 @@ function sourceLink(url) {
   }
 }
 
-function Sources({ids, evidence}) {
+const sourceKinds = {
+  web_excerpt: 'Web excerpt', search_summary: 'Search summary', metadata: 'Metadata',
+};
+
+function Sources({ids, evidence, label = 'View sources'}) {
   const items = [...new Set(ids)].map(id => evidence.get(id)).filter(Boolean);
   if (!items.length) return null;
+  const publications = [...new Set(items.filter(item => item.kind === 'editorial').map(item => item.locator))];
   return <details className="sources">
-    <summary>View sources <span>{items.length}</span></summary>
+    <summary>{label} <span>{publications.join(' · ') || items.length}</span></summary>
     {items.map(item => <div className="source" key={item.id}>
       <a href={sourceLink(item.source_url)} target="_blank" rel="noreferrer">{item.source_title} ↗</a>
-      <small>{item.kind === 'web_excerpt' ? 'Web excerpt' : item.kind === 'search_summary' ? 'Search summary' : item.kind === 'metadata' ? 'Metadata' : 'Source summary'}</small>
-      {item.kind !== 'metadata' && <p>{item.body}</p>}
+      <small>{item.kind === 'editorial' ? item.locator : sourceKinds[item.kind] ?? 'Source summary'}</small>
+      {item.kind !== 'metadata' && item.kind !== 'editorial' && <p>{item.body}</p>}
     </div>)}
   </details>;
 }
@@ -45,7 +50,8 @@ function FilmPoster({path, className}) {
 }
 
 function TimelineFilm({film, onOpen, selected}) {
-  return <button type="button" className="timeline-film" aria-pressed={selected} onClick={() => onOpen(film.id)}>
+  return <button type="button" className="timeline-film" aria-haspopup="dialog" aria-expanded={selected}
+    onClick={event => onOpen(film.id, event.currentTarget)}>
     <FilmPoster key={film.poster_path} path={film.poster_path} className="timeline-poster" />
     <span className="timeline-film-title">{film.title} <span aria-hidden="true">↗</span>
       <small className="timeline-film-year">{film.year}</small>
@@ -53,114 +59,162 @@ function TimelineFilm({film, onOpen, selected}) {
   </button>;
 }
 
-function FurtherReading({runId, filmId}) {
+const readingOrigins = {
+  catalogue: 'Verified catalogue', research: 'Found during research', web: 'Verified online',
+  reference: 'External link · full text unavailable',
+};
+
+function FurtherReading({runId, filmId, cache}) {
   const [readings, setReadings] = useState(null);
-  const [failed, setFailed] = useState(false);
+  const [message, setMessage] = useState('');
 
   useEffect(() => {
     let active = true;
-    api.getFilmReadings(runId, filmId).then(data => {
-      if (active) setReadings(data.readings);
-    }).catch(() => {
-      if (active) setFailed(true);
-    });
-    return () => { active = false; };
-  }, [runId, filmId]);
+    const entry = cache.get(filmId) || {};
+    cache.set(filmId, entry);
 
-  return <section className="film-readings" aria-label="Criticism and further reading">
-    <h4>Criticism and further reading</h4>
-    {failed && <p className="muted">Articles could not load. Reopen the film details to retry.</p>}
-    {readings === null && !failed && <p className="muted">Looking for articles…</p>}
-    {readings?.length === 0 && <p className="muted">No matching articles found.</p>}
+    async function load() {
+      try {
+        entry.saved ??= api.getFilmReadings(runId, filmId);
+        const saved = (await entry.saved).readings;
+        if (active) {
+          setReadings(saved);
+          setMessage('');
+        }
+      } catch {
+        entry.saved = null;
+        if (active) {
+          setReadings([]);
+          setMessage('Saved articles could not load.');
+        }
+      }
+    }
+
+    load();
+    return () => { active = false; };
+  }, [runId, filmId, cache]);
+
+  return <section className="film-readings" aria-labelledby="film-readings-title">
+    <div className="section-head">
+      <h4 id="film-readings-title">Criticism and further reading</h4>
+    </div>
+    {readings === null && <p className="muted">Loading saved articles…</p>}
+    {readings?.length === 0 && !message && <p className="muted">No articles saved for this film.</p>}
     {!!readings?.length && <ul>
       {readings.map(reading => <li key={reading.url}>
         <small className="muted">{reading.publication}{reading.author ? ' · ' + reading.author : ''}</small>
         <a href={sourceLink(reading.url)} target="_blank" rel="noreferrer">{reading.title}<span aria-hidden="true">&nbsp;↗</span></a>
         {reading.summary && <p>{reading.summary}</p>}
+        {reading.excerpt && <blockquote>{reading.excerpt}</blockquote>}
+        {readingOrigins[reading.origin] && <small className="reading-origin">{readingOrigins[reading.origin]}</small>}
       </li>)}
     </ul>}
+    {message && <p className="muted" role="status">{message}</p>}
   </section>;
 }
 
-function FilmDetail({run, filmId, storyEvents, onClose}) {
+function FilmDialog({run, selected, opener, onClose, readingsCache}) {
+  const panel = useRef(null);
+  const closeButton = useRef(null);
+  useEffect(() => {
+    const dialog = panel.current;
+    dialog.showModal();
+    closeButton.current.focus({preventScroll: true});
+    return () => {
+      if (dialog.open) dialog.close();
+      opener?.focus({preventScroll: true});
+    };
+  }, [opener]);
+
+  function close() {
+    panel.current.close();
+    onClose();
+  }
+
+  return <dialog className="film-dialog" ref={panel} aria-labelledby="film-dialog-title"
+      onCancel={event => { event.preventDefault(); close(); }}
+      onClick={event => { if (event.target === panel.current) close(); }}>
+    <div className="film-dialog-surface">
+      <header className="film-dialog-header">
+        <span className="kicker">Film details</span>
+        <button className="film-dialog-close" ref={closeButton} type="button" aria-label="Close film details" onClick={close}>×</button>
+      </header>
+      <FilmDetail run={run} selected={selected} readingsCache={readingsCache} />
+    </div>
+  </dialog>;
+}
+
+function FilmDetail({run, selected, readingsCache}) {
+  const {film: selectedFilm, events: storyEvents} = selected;
+  const filmId = selectedFilm.id;
   const [detail, setDetail] = useState(null);
   const [ratings, setRatings] = useState(null);
   const [error, setError] = useState('');
   const [ratingError, setRatingError] = useState('');
   useEffect(() => {
     let active = true;
-    let timer;
     api.getFilm(run.run_id, filmId).then(data => {
       if (active) setDetail(data);
     }).catch(problem => { if (active) setError(problem.message); });
-    async function readRatings(attempt = 0) {
-      try {
-        const data = await api.getRatings(filmId);
-        if (active) { setRatings(data.ratings); setRatingError(''); }
-      } catch {
-        if (active) { setRatings([]); setRatingError('Ratings could not load. Reopen the film details to retry.'); }
-      }
-      if (active && run.model_mode !== 'mock' && attempt < 4) {
-        timer = setTimeout(() => readRatings(attempt + 1), 2500);
-      }
-    }
-    readRatings();
-    return () => { active = false; clearTimeout(timer); };
-  }, [run.run_id, run.model_mode, filmId]);
+    api.getRatings(filmId).then(data => {
+      if (active) { setRatings(data.ratings); setRatingError(''); }
+    }).catch(() => {
+      if (active) { setRatings([]); setRatingError('Ratings could not load. Reopen the film details to retry.'); }
+    });
+    return () => { active = false; };
+  }, [run.run_id, filmId]);
 
-  const film = detail?.film;
+  const film = detail?.film ?? selectedFilm;
   const tmdbUrl = Number.isInteger(film?.tmdb_id) && film.tmdb_id > 0
     ? `https://www.themoviedb.org/movie/${film.tmdb_id}` : null;
 
   return <section className="film-detail" aria-label="Film details">
-    <div className="section-head"><span className="kicker">Film details</span>
-      <button className="text-button" onClick={onClose}>Close</button></div>
-    {error && <p role="alert">{error}</p>}
-    {!detail && !error && <p>Loading film details…</p>}
-    {detail && <>
-      <div className="film-detail-intro">
-        <FilmPoster key={film.poster_path} path={film.poster_path} className="film-detail-poster" />
-        <div>
-          <h3>{film.title}</h3>
-          <p className="muted">{[film.year, film.director, film.countries.join(' / ')].filter(Boolean).join(' · ')}</p>
-          {storyEvents.length > 0 && <p className="muted">
-            Story period · {[...new Set(storyEvents.map(event => event.period))].join(' / ')}
-          </p>}
-          {film.overview && <p className="film-overview">{film.overview}</p>}
-          {tmdbUrl && <a className="film-catalog-link" href={tmdbUrl} target="_blank" rel="noreferrer">
-            View on TMDB <span aria-hidden="true">↗</span>
-          </a>}
-        </div>
+    <div className="film-detail-intro">
+      <FilmPoster key={film.poster_path} path={film.poster_path} className="film-detail-poster" />
+      <div>
+        <h3 id="film-dialog-title">{film.title}</h3>
+        <p className="muted">{[film.year, film.director, film.countries?.join(' / ')].filter(Boolean).join(' · ')}</p>
+        {storyEvents.length > 0 && <p className="muted">
+          Story period · {[...new Set(storyEvents.map(event => event.period))].join(' / ')}
+        </p>}
+        {film.overview && <p className="film-overview">{film.overview}</p>}
+        {tmdbUrl && <a className="film-catalog-link" href={tmdbUrl} target="_blank" rel="noreferrer">
+          View on TMDB <span aria-hidden="true">↗</span>
+        </a>}
       </div>
-      <section className="film-ratings" aria-labelledby="film-ratings-title">
-        <h4 id="film-ratings-title">Ratings</h4>
-        <div className="rating-strip">
-          {ratings?.map(rating => <a className="rating" key={rating.origin + rating.metric}
-              href={sourceLink(rating.source_url)} target="_blank" rel="noreferrer">
-            <strong>{rating.value.toLocaleString('en-US', {maximumFractionDigits: 1})}{rating.metric === 'tomatometer' ? '%' : `/${rating.scale}`}</strong>
-            <span>{rating.origin} ↗</span>
-            {rating.provider === 'demo_snapshot' && <small>Demo rating snapshot</small>}
-            <small>{rating.metric === 'audience' ? 'Audience score' : 'Critic score'}
-              {rating.count ? ` · ${rating.count} votes` : ''}{rating.as_of ? ` · ${rating.as_of.slice(0, 10)}` : ''}</small>
-          </a>)}
-          {ratingError && <p role="alert">{ratingError}</p>}
-          {ratings?.length === 0 && !ratingError && <p className="muted">No ratings available</p>}
-          {ratings === null && <p className="muted">Loading ratings…</p>}
-        </div>
-      </section>
-      <FurtherReading runId={run.run_id} filmId={filmId} />
-      <details className="release-details"><summary>Release records and story setting</summary>
-        {detail.film.releases.map((release, i) => <p key={i}>
-          <a href={sourceLink(release.source_url)} target="_blank" rel="noreferrer">{release.label} ↗</a>
-          {' '}{release.region} {({premiere: 'Premiere', theatrical: 'Theatrical release', release_year: 'Release year', tmdb_release: 'TMDB release date'})[release.kind]}
-        </p>)}
-        {detail.film.story && <p>Story or archival setting · {detail.film.story}</p>}
-      </details>
-      {detail.guide ? <Claims claims={[detail.guide.reason, ...detail.guide.primer, ...detail.guide.background]}
-                              evidence={new Map(detail.evidence.map(item => [item.id, item]))} />
-        : <Sources ids={detail.evidence.filter(item => item.film_id === filmId).map(item => item.id)}
-                   evidence={new Map(detail.evidence.map(item => [item.id, item]))} />}
-    </>}
+    </div>
+    {error && <p role="alert">{error}</p>}
+    {!detail && !error && <p className="muted">Loading film details…</p>}
+    {detail?.guide && <section className="film-guide-notes" aria-label="Recommendation and viewing notes">
+      <Claims claims={[detail.guide.reason, ...detail.guide.primer, ...detail.guide.background]}
+              evidence={new Map(detail.evidence.map(item => [item.id, item]))} />
+    </section>}
+    <section className="film-ratings" aria-labelledby="film-ratings-title">
+      <h4 id="film-ratings-title">Ratings</h4>
+      <div className="rating-strip">
+        {ratings?.map(rating => <a className="rating" key={rating.origin + rating.metric}
+            href={sourceLink(rating.source_url)} target="_blank" rel="noreferrer">
+          <strong>{rating.value.toLocaleString('en-US', {maximumFractionDigits: 1})}{rating.metric === 'tomatometer' ? '%' : `/${rating.scale}`}</strong>
+          <span>{rating.origin} ↗</span>
+          {rating.provider === 'demo_snapshot' && <small>Demo rating snapshot</small>}
+          <small>{rating.metric === 'audience' ? 'Audience score' : 'Critic score'}
+            {rating.count ? ` · ${rating.count} votes` : ''}{rating.as_of ? ` · ${rating.as_of.slice(0, 10)}` : ''}</small>
+        </a>)}
+        {ratingError && <p role="alert">{ratingError}</p>}
+        {ratings?.length === 0 && !ratingError && <p className="muted">No ratings available</p>}
+        {ratings === null && <p className="muted">Loading ratings…</p>}
+      </div>
+    </section>
+    <FurtherReading runId={run.run_id} filmId={filmId} cache={readingsCache} />
+    {detail && <details className="release-details"><summary>Release records and story setting</summary>
+      {detail.film.releases.map((release, i) => <p key={i}>
+        <a href={sourceLink(release.source_url)} target="_blank" rel="noreferrer">{release.label} ↗</a>
+        {' '}{release.region} {({premiere: 'Premiere', theatrical: 'Theatrical release', release_year: 'Release year', tmdb_release: 'TMDB release date'})[release.kind]}
+      </p>)}
+      {detail.film.story && <p>Story or archival setting · {detail.film.story}</p>}
+    </details>}
+    {detail && !detail.guide && <Sources ids={detail.evidence.filter(item => item.film_id === filmId).map(item => item.id)}
+      evidence={new Map(detail.evidence.map(item => [item.id, item]))} />}
   </section>;
 }
 
@@ -184,11 +238,12 @@ function storyYear(event) {
 }
 
 export default function Results({run, onRetryGuide, retryingGuide, onReviewNearby}) {
-  const [axis, setAxis] = useState(() => run.constraints.axis || 'viewing');
+  const [axis, setAxis] = useState('viewing');
   const [zoom, setZoom] = useState(100);
-  const [filmId, setFilmId] = useState(null);
+  const [openDetail, setOpenDetail] = useState(null);
+  const filmId = openDetail?.id;
   const timelineViewport = useRef(null);
-  const detailPanel = useRef(null);
+  const readingsCache = useRef(new Map());
   const study = run.study || {};
   const films = new Map((study.films || []).map(film => [film.id, film]));
   const evidence = new Map((study.evidence || []).map(item => [item.id, item]));
@@ -228,12 +283,8 @@ export default function Results({run, onRetryGuide, retryingGuide, onReviewNearb
     if (timelineViewport.current) timelineViewport.current.scrollLeft = 0;
   }
 
-  function openFilm(id) {
-    setFilmId(id);
-    requestAnimationFrame(() => {
-      detailPanel.current?.focus({preventScroll: true});
-      detailPanel.current?.scrollIntoView({block: 'nearest'});
-    });
+  function openFilm(id, opener) {
+    setOpenDetail({id, opener});
   }
 
   return <div className="results">
@@ -291,6 +342,8 @@ export default function Results({run, onRetryGuide, retryingGuide, onReviewNearb
               {hasPreferences && decisions.get(film.id)?.preference_fit === 1 &&
                 <small className="muted">Matches some of your preferences</small>}
               <p>{reasons.get(film.id)?.text || decisions.get(film.id)?.reason}</p>
+              <Sources ids={reasons.get(film.id)?.evidence_ids || decisions.get(film.id)?.evidence_ids || []}
+                       evidence={evidence} label="Recommendation sources" />
               {axis === 'story' && <Sources ids={events.flatMap(event => event.evidence_ids)} evidence={evidence} />}
             </div>
           </li>)}
@@ -329,12 +382,12 @@ export default function Results({run, onRetryGuide, retryingGuide, onReviewNearb
               <TimelineFilm key={film.id} film={film} selected={film.id === filmId} onOpen={openFilm} />)}
           </div>
         </div>}
-      {selected && <div className="timeline-details" ref={detailPanel} tabIndex={-1}>
-        <FilmDetail key={filmId} run={run} filmId={filmId} storyEvents={selected.events} onClose={() => setFilmId(null)} />
-      </div>}
+      {selected && <FilmDialog key={filmId} run={run} selected={selected} opener={openDetail.opener} readingsCache={readingsCache.current}
+        onClose={() => setOpenDetail(null)} />}
     </section>}
     {guide?.common_primer?.length > 0 && <section className="primer">
-      <h3>Before you watch</h3><Claims claims={guide.common_primer} evidence={evidence} />
+      <h3>Before you watch</h3>
+      <div className="primer-notes"><Claims claims={guide.common_primer} evidence={evidence} /></div>
     </section>}
     {guide?.discussion_questions.length > 0 && <section className="post-view">
       <h3>Discussion questions</h3>

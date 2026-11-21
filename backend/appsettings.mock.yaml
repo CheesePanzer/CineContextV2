@@ -31,7 +31,7 @@ tools:
     snippets_per_url: 2
     excerpt_length: 1400
   duckduckgo:
-    enabled: true
+    enabled: false
     endpoint: https://html.duckduckgo.com/html/
     query_length: 600
     result_limit: 4

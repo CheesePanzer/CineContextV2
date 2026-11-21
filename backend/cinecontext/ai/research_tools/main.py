@@ -14,7 +14,7 @@ from ..types import EvidenceDraft, FilmProjection
 from .brave import BraveSearchProvider
 from .crawler import WebCrawler, resolve_host
 from .duckduckgo import DuckDuckGoSearchProvider
-from .editorial import curated_candidates, curated_evidence
+from .editorial import EditorialResearch, curated_candidates
 from .local import LocalResearchProvider
 from .omdb import OmdbRatingsProvider
 from .ratings import RatingStore
@@ -56,7 +56,7 @@ class ResearchTools(Protocol):
     async def find_candidates(self, theme: str) -> Sequence[UUID]: ...
     async def discover_catalog(self, terms: list[str], constraints: Constraints) -> list[FilmHint]: ...
     async def discover_editorial(self, constraints: Constraints, terms: list[str]) -> list[FilmHint]: ...
-    async def search_editorial(self, film: FilmProjection) -> list[EvidenceDraft]: ...
+    async def search_editorial(self, film: FilmProjection, focus: str = "", *, live: bool = True) -> list[EvidenceDraft]: ...
     async def lookup_local_movie(self, film_id: UUID) -> FilmProjection: ...
     async def lookup_movie(self, hint: FilmHint) -> FilmProjection | None: ...
     async def enrich_local_movie(self, film: FilmProjection) -> None: ...
@@ -76,12 +76,14 @@ class ResearchToolsFacade:
         metadata: FilmMetadataProvider,
         web: WebSearchProvider,
         ratings: RatingsProvider,
+        editorial: EditorialResearch,
         options: ToolsOptions,
     ):
         self.local = local
         self.metadata = metadata
         self.web = web
         self.ratings = ratings
+        self.editorial = editorial
         self.options = options
 
     @property
@@ -108,8 +110,9 @@ class ResearchToolsFacade:
     async def discover_editorial(self, constraints: Constraints, terms: list[str]) -> list[FilmHint]:
         return curated_candidates(constraints, terms)
 
-    async def search_editorial(self, film: FilmProjection) -> list[EvidenceDraft]:
-        return curated_evidence(film)
+    async def search_editorial(self, film: FilmProjection, focus: str = "", *, live: bool = True) -> list[EvidenceDraft]:
+        matches = await self.editorial.find(film, focus=focus, live=live)
+        return [match.to_evidence(film) for match in matches if match.reading.origin != "reference"]
 
     async def lookup_movie(self, hint: FilmHint):
         return await self.metadata.lookup_movie(hint)
@@ -146,6 +149,8 @@ def create_research_tools(
     rating_store = RatingStore(persistence)
     metadata = TmdbMetadataProvider(persistence, http, options.tmdb, local, rating_store)
     ratings = OmdbRatingsProvider(http, options.omdb, rating_store)
+    crawler = WebCrawler(http, options.crawler, resolver)
+    editorial = EditorialResearch(http, options, crawler)
     if options.brave.enabled:
         web = BraveSearchProvider(http, options.brave)
         web_name = "brave"
@@ -153,7 +158,6 @@ def create_research_tools(
         web = WikipediaSearchProvider(http, local)
         web_name = "wikipedia"
     else:
-        crawler = WebCrawler(http, options.crawler, resolver)
         web = DuckDuckGoSearchProvider(options.duckduckgo, options.crawler, crawler)
         web_name = "duckduckgo"
     logger.debug(
@@ -161,4 +165,4 @@ def create_research_tools(
         web_name, "tmdb" if options.tmdb.enabled else "local",
         "omdb" if options.omdb.enabled else "disabled", options.crawler.enabled,
     )
-    return ResearchToolsFacade(local, metadata, web, ratings, options)
+    return ResearchToolsFacade(local, metadata, web, ratings, editorial, options)

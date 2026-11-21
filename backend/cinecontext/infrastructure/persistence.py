@@ -74,7 +74,10 @@ class SqlAlchemyFilmRepository(SqlAlchemyRepository[Film]):
         tag = Film.facts["theme"].astext
         statement = (
             select(Film.id)
-            .where(func.to_tsvector("simple", theme).op("@@")(func.plainto_tsquery("simple", tag)))
+            .where(
+                func.to_tsvector("simple", theme).op("@@")(func.plainto_tsquery("simple", tag))
+                | Film.facts["additional_themes"].contains([theme])
+            )
             .order_by(Film.created_at, Film.id)
             .limit(limit)
         )

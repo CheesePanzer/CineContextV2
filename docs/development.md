@@ -27,7 +27,7 @@ Open `/docs` for the FastAPI schema when the service is running.
 | DELETE | `/api/runs/{run_id}` | Removes a terminal run and its owned records |
 | POST | `/api/runs/{run_id}/retry-guide` | Recreates the guide from saved research |
 | GET | `/api/runs/{run_id}/films/{film_id}` | Returns film metadata, guide details, and evidence |
-| GET | `/api/runs/{run_id}/films/{film_id}/readings` | Checks film membership, closes the database scope, and returns available criticism and further reading |
+| GET | `/api/runs/{run_id}/films/{film_id}/readings` | Returns saved criticism after checking film membership. Add `?live=true` to look up missing publishers after the database scope closes. |
 | GET | `/api/films/{film_id}/ratings` | Returns persisted rating snapshots |
 
 Sending the same `submission_key` with the same criteria returns the existing run. Changing the criteria for that key returns HTTP 409.
@@ -63,7 +63,7 @@ The unit tests cover workflow transitions, serialization, timeline and guide val
 CINECONTEXT_TEST_URL=http://127.0.0.1:8765 ./.venv/bin/python tests/smoke.py
 ```
 
-The smoke suite creates runs in the connected database and exercises three supported themes plus an unsupported one. The repository has no committed browser suite or CI tests for live providers and multi-worker recovery.
+The smoke suite creates runs in the connected database for medieval European history, the Romanian New Wave, Italian neorealism, and MCU worldbuilding. It checks selected films, timeline ordering, and citations against fixture data. On the Romanian and Italian cases it also checks that the detail endpoint returns a TMDB rating snapshot and articles from Criterion, BFI, and Senses of Cinema. The repository has no committed browser suite or CI tests for live providers and multi-worker recovery.
 
 ## Where to make changes
 

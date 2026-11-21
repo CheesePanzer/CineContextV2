@@ -61,6 +61,9 @@ class TaccSdkTransport(httpx.AsyncBaseTransport):
             return b"JOBID"
         if args[0] == "cat" and b"No such file or directory" in output:
             return b""
+        if args[0] in {"ps", "cat"}:
+            logger.debug("TACC status command failed command=%s job_id=%s exit_code=%s ssh_error=%s",
+                         args[0], self.job_id, process.returncode, b"ssh:" in output.lower())
         return None
 
     async def job_state(self, timeout=20) -> tuple[str, int | None]:

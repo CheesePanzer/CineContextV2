@@ -32,7 +32,9 @@ async def health(
     job = None
     if readiness and readiness.job_id:
         job = {"id": readiness.job_id, "queued_seconds": readiness.queued_seconds,
-               "remaining_seconds": readiness.remaining_seconds}
+               "remaining_seconds": readiness.remaining_seconds,
+               "last_confirmed_status": readiness.last_confirmed_status,
+               "last_confirmed_seconds": readiness.last_confirmed_seconds}
     return {"status": "ok", "model_mode": models.mode, "model_status": readiness.status if readiness else None,
             "tacc_job": job,
             "tacc_resubmit_enabled": bool(job and is_local(request)),
@@ -113,8 +115,10 @@ async def get_film(run_id: UUID, film_id: UUID, service: Inject[RunApplicationSe
 
 
 @router.get("/runs/{run_id}/films/{film_id}/readings")
-async def get_film_readings(run_id: UUID, film_id: UUID, service: Inject[FilmReadingsApplicationService]):
-    return await service.get(run_id, film_id)
+async def get_film_readings(
+    run_id: UUID, film_id: UUID, service: Inject[FilmReadingsApplicationService], live: bool = False,
+):
+    return await service.get(run_id, film_id, live=live)
 
 
 @router.get("/films/{film_id}/ratings")

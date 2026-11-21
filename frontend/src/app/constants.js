@@ -1,7 +1,7 @@
 export const AXIS_NAMES = {release: 'Release date', story: 'Story period', myth: 'Mythology', history: 'Historical context'};
 export const TACC_STATUS_NAMES = {
   queued: 'Waiting for TACC GPUs', starting: 'Qwen is starting', ready: 'TACC ready',
-  stopped: 'TACC job ended', unavailable: 'TACC status unavailable',
+  stopped: 'TACC job ended', unavailable: 'TACC status check failed',
   restarting: 'Replacing TACC job',
 };
 export const TACC_WAITING_STATES = new Set(['queued', 'starting', 'stopped', 'restarting']);

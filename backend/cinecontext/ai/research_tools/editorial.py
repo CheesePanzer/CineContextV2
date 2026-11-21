@@ -1,6 +1,10 @@
 import asyncio
+import logging
 import re
+from collections.abc import AsyncIterator, Sequence
+from codecs import getincrementaldecoder
 from dataclasses import dataclass
+from html import unescape
 from unicodedata import combining, normalize
 from urllib.parse import urlsplit
 
@@ -9,10 +13,14 @@ from alcedo import Options
 
 from ...contracts import Constraints, FilmHint, FurtherReading
 from ...settings import ToolsOptions
-from ..types import EvidenceDraft, EvidenceKind, FilmProjection
+from ..types import EvidenceDraft, EvidenceKind, EvidenceRecord, FilmProjection, SearchResult
 from .brave import BraveSearchProvider
-from .crawler import WebCrawler
+from .crawler import VisibleHTMLParser, WebCrawler
 from .duckduckgo import DuckDuckGoSearchProvider
+from .wikipedia import WikipediaSearchProvider
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -41,7 +49,7 @@ def contains_term(text: str, term: str) -> bool:
 
 def curated(title, year, publication, headline, url, summary, author=None):
     return CuratedReading(title, year, FurtherReading(
-        publication=publication, title=headline, url=url, summary=summary, author=author,
+        publication=publication, title=headline, url=url, summary=summary, author=author, origin="catalogue",
     ))
 
 
@@ -102,6 +110,51 @@ ROMANIAN_POLITICAL_CINEMA = (
             "https://iffr.com/en/iffr/2007/films/the-paper-will-be-blue",
             "The festival describes Muntean’s realistic reconstruction of a night in the 1989 Romanian Revolution, when soldiers receive orders over television."),
 )
+ROMANIAN_NEW_WAVE_READINGS = (
+    curated("4 Months, 3 Weeks and 2 Days", 2007, "Criterion",
+            "4 Months, 3 Weeks and 2 Days: Late Term",
+            "https://www.criterion.com/current/posts/6166-4-months-3-weeks-and-2-days-late-term",
+            "Taylor examines how an ordinary birthday dinner and small gestures give a sense of life under Ceaușescu within Mungiu’s tightly observed, single-day story.",
+            "Ella Taylor"),
+    curated("4 Months, 3 Weeks and 2 Days", 2007, "BFI / Sight and Sound",
+            "Sight and Sound’s original verdict on 15 of Cannes’ biggest Palme d’Or winners",
+            "https://www.bfi.org.uk/sight-and-sound/lists/original-verdict-15-cannes-biggest-palme-dor-winners",
+            "In his original Cannes review, James highlights Mungiu’s attention to everyday detail and Anamaria Marinca’s performance as Otilia.",
+            "Nick James"),
+    curated("4 Months, 3 Weeks and 2 Days", 2007, "Senses of Cinema",
+            "Holding Up the Other Half of the Sky: The 26th Vancouver International Film Festival",
+            "https://www.sensesofcinema.com/2008/festival-reports/vancouver-iff-2007/",
+            "Reynaud reads Mungiu’s portrait of friendship through its careful staging, bodily gestures, and the practical obstacles Otilia faces in Ceaușescu’s Romania.",
+            "Bérénice Reynaud"),
+    curated("Tuesday, After Christmas", 2010, "BFI / Sight and Sound", "Radu Muntean: three’s a crowd",
+            "https://www.bfi.org.uk/sight-and-sound/interviews/radu-muntean-threes-crowd",
+            "Gray connects Muntean’s long takes, rehearsed dialogue, and quietly observed marriage crisis to the Romanian New Wave’s realist style.",
+            "Carmen Gray"),
+    curated("Child's Pose", 2013, "BFI", "10 great Romanian New Wave films",
+            "https://www.bfi.org.uk/lists/10-great-romanian-new-wave-films",
+            "Gray situates Netzer’s film in the Romanian New Wave and reads its portrayal of an influential Bucharest family as a satire of privilege and corruption.",
+            "Carmen Gray"),
+)
+ITALIAN_NEOREALISM_READINGS = (
+    curated("Rome, Open City", 1945, "BFI", "Rome, Open City: Roberto Rossellini’s great leap for realism on screen",
+            "https://www.bfi.org.uk/features/rome-open-city-roberto-rossellinis-great-leap-realism-screen",
+            "The BFI traces how Rossellini’s account of resistance in occupied Rome helped launch Italian neorealism."),
+    curated("Bicycle Thieves", 1948, "Criterion", "Bicycle Thieves: A Passionate Commitment to the Real",
+            "https://www.criterion.com/current/posts/467-bicycle-thieves-a-passionate-commitment-to-the-real",
+            "Cheshire connects De Sica’s street locations and nonprofessional cast to the film’s portrayal of unemployment and solidarity in postwar Rome.",
+            "Godfrey Cheshire"),
+    curated("Bicycle Thieves", 1948, "BFI", "Where to begin with Vittorio De Sica",
+            "https://www.bfi.org.uk/features/where-begin-vittorio-de-sica",
+            "Iannone recommends this father-and-son story as an introduction to De Sica and to neorealism’s interest in ordinary lives.",
+            "Pasquale Iannone"),
+    curated("Bicycle Thieves", 1948, "Senses of Cinema", "The Tribulations of the Working Class: Bicycle Thieves",
+            "https://www.sensesofcinema.com/2020/cteq/bicycle-thieves-vittorio-de-sica-1948/",
+            "The essay approaches De Sica’s search for a stolen bicycle through working-class life, unemployment, and the pressures of postwar Italy."),
+    curated("Umberto D.", 1952, "BFI", "Where to begin with Vittorio De Sica",
+            "https://www.bfi.org.uk/features/where-begin-vittorio-de-sica",
+            "Iannone places De Sica’s film about a retired civil servant among his key neorealist portraits of everyday postwar life.",
+            "Pasquale Iannone"),
+)
 PACIFIC_WAR_READINGS = (
     curated("The Thin Red Line", 1998, "Criterion", "The Thin Red Line: This Side of Paradise",
             "https://www.criterion.com/current/posts/1603-the-thin-red-line-this-side-of-paradise",
@@ -134,6 +187,9 @@ MARVEL_READINGS = (
             BFI_MCU_GUIDE,
             "O’Callaghan recommends starting with Tony Stark’s origin story, highlighting Downey’s performance and the brisk opening that introduces the character.",
             "Paul O’Callaghan"),
+    curated("Thor", 2011, "BFI", "Where to begin with the Marvel Cinematic Universe", BFI_MCU_GUIDE,
+            "O’Callaghan discusses how Thor brings Norse mythology and Asgard into the MCU and introduces Loki before the first Avengers crossover.",
+            "Paul O’Callaghan"),
     curated("Captain America: The First Avenger", 2011, "BFI",
             "Where to begin with the Marvel Cinematic Universe", BFI_MCU_GUIDE,
             "The guide offers Steve Rogers’s wartime origin as an alternative starting point and examines how the film uses his history as a propaganda figure.",
@@ -157,7 +213,24 @@ MARVEL_READINGS = (
             "Newman praises the finale’s character moments and closure. He notes that several returning characters and cameos assume viewers remember earlier films.",
             "Kim Newman"),
 )
-READINGS = MIDDLE_AGES + NORSE + ROMANIAN_POLITICAL_CINEMA + PACIFIC_WAR_READINGS + MARVEL_READINGS + (
+SPIDER_MAN_READINGS = (
+    curated("Spider-Man: Homecoming", 2017, "BFI / Sight and Sound",
+            "Spider-Man: Homecoming review – Peter Parker as a humble high-school hero",
+            "https://www.bfi.org.uk/sight-and-sound/reviews/spider-man-homecoming-review-peter-parker-humble-high-school-hero",
+            "Sight and Sound praises Jon Watts’s reboot for skipping a repeated origin story and grounding Tom Holland’s Peter Parker in a brisk high-school story with working-class stakes."),
+    curated("Spider-Man: Far From Home", 2019, "BFI / Sight and Sound",
+            "Spider-Man: Far from Home review – insider japery and daffy humour",
+            "https://www.bfi.org.uk/sight-and-sound/reviews/spider-man-far-from-home-review-insider-japery-daffy-humour",
+            "Sight and Sound describes the European school-trip sequel as a lighter post-Endgame follow-up in which Peter Parker tries to step out from Tony Stark’s shadow."),
+    curated("Spider-Man: No Way Home", 2021, "BFI / Sight and Sound",
+            "Spider-Man: No Way Home offers a satisfying trip through the multiverse",
+            "https://www.bfi.org.uk/sight-and-sound/reviews/spider-man-no-way-home-is-satisfying-trip-through-multiverse",
+            "Sight and Sound examines how No Way Home uses the multiverse to unite characters from earlier Spider-Man series while resetting Peter Parker’s personal life."),
+)
+READINGS = (
+    MIDDLE_AGES + NORSE + ROMANIAN_POLITICAL_CINEMA + ROMANIAN_NEW_WAVE_READINGS + ITALIAN_NEOREALISM_READINGS
+    + PACIFIC_WAR_READINGS + MARVEL_READINGS + SPIDER_MAN_READINGS
+) + (
     curated("Jan Žižka", 1956, "Czech National Film Archive",
             "Jan Žižka", "https://nfa.cz/cs/25486-jan-zizka",
             "Vávra’s film follows the Hussite movement after the death of Wenceslaus IV, with Žižka cast as a leader of the popular revolt."),
@@ -185,7 +258,14 @@ def curated_candidates(constraints: Constraints, terms: list[str]) -> list[FilmH
         contains_term(query, term) for term in ("surveillance", "revolution", "political memory", "communism")
     ):
         rows += ROMANIAN_POLITICAL_CINEMA
-    if any(contains_term(query, term) for term in ("marvel cinematic universe", "mcu", "marvel")):
+    if contains_term(query, "romanian new wave"):
+        rows += ROMANIAN_NEW_WAVE_READINGS
+    if any(contains_term(query, term) for term in ("italian neorealism", "italian neo realism", "italian neorealist")):
+        rows += ITALIAN_NEOREALISM_READINGS
+    marvel_query = search_key(f"{constraints.theme} {constraints.topic}")
+    if any(contains_term(marvel_query, term) for term in ("spider man", "spiderman", "brand new day")):
+        rows += SPIDER_MAN_READINGS + tuple(row for row in MARVEL_READINGS if row.title == "Avengers: Endgame")
+    elif any(contains_term(marvel_query, term) for term in ("marvel cinematic universe", "mcu", "marvel", "avengers", "infinity saga")):
         rows += MARVEL_READINGS
     hints = {}
     for row in rows:
@@ -197,22 +277,29 @@ def curated_candidates(constraints: Constraints, terms: list[str]) -> list[FilmH
     return list(hints.values())
 
 
-def curated_evidence(film: FilmProjection) -> list[EvidenceDraft]:
-    return [
-        EvidenceDraft(
-            film_id=film.id, source_url=str(row.reading.url),
-            source_title=row.reading.title, locator=row.reading.publication,
-            body=row.reading.summary or "", kind=EvidenceKind.FILM,
-        )
-        for row in READINGS if row.matches(film)
-    ]
-
-
-PUBLICATIONS = {
+CORE_PUBLICATIONS = {
     "criterion.com": "Criterion",
     "bfi.org.uk": "BFI / Sight and Sound",
     "sensesofcinema.com": "Senses of Cinema",
 }
+EXTENDED_PUBLICATIONS = {
+    "theguardian.com": "The Guardian",
+    "bbc.com": "BBC Culture",
+    "variety.com": "Variety",
+    "filmcomment.com": "Film Comment",
+    "rogerebert.com": "RogerEbert.com",
+}
+PUBLICATIONS = {**CORE_PUBLICATIONS, **EXTENDED_PUBLICATIONS}
+SENSES_API = "https://www.sensesofcinema.com/wp-json/wp/v2"
+FILM_COMMENT_API = "https://www.filmcomment.com/wp-json/wp/v2"
+
+
+def normalize_reference_url(url: str) -> str:
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    if parsed.scheme == "http" and host in PUBLICATIONS:
+        return url.replace("http://", "https://", 1)
+    return url
 
 
 def article_url(url: str, host: str) -> bool:
@@ -223,46 +310,306 @@ def article_url(url: str, host: str) -> bool:
     if host == "criterion.com":
         return bool(re.fullmatch(r"/current/posts/[0-9]+-[a-z0-9-]+", path))
     if host == "bfi.org.uk":
-        return bool(re.fullmatch(r"/sight-and-sound/(reviews|features)/[^/]+", path))
-    return bool(re.fullmatch(r"/[0-9]{4}/[^/]+/[^/]+", path))
+        return bool(re.fullmatch(
+            r"/(?:(?:sight-and-sound/)?(?:lists|features)|sight-and-sound/(?:reviews|interviews|news))/[a-z0-9-]+",
+            path,
+        ))
+    if host == "sensesofcinema.com":
+        return bool(re.fullmatch(r"/[0-9]{4}/[^/]+/[^/]+", path))
+    if host == "theguardian.com":
+        return bool(re.fullmatch(r"/film/[0-9]{4}/[a-z]{3}/[0-9]{2}/[a-z0-9-]+", path))
+    if host == "bbc.com":
+        return bool(re.fullmatch(r"/culture/article/[0-9a-z-]+", path))
+    if host == "variety.com":
+        return bool(re.fullmatch(r"/(?:[0-9]{4}/film/(?:reviews|features|news)/[a-z0-9-]+|review/[A-Za-z0-9-]+)", path))
+    if host == "filmcomment.com":
+        return bool(re.fullmatch(r"/(?:article|blog)?/?[a-z0-9-]{4,}", path))
+    if host == "rogerebert.com":
+        return bool(re.fullmatch(r"/reviews/[a-z0-9-]+", path))
+    return False
+
+
+@dataclass(frozen=True)
+class EditorialMatch:
+    reading: FurtherReading
+    passage: str = ""
+
+    def to_evidence(self, film: FilmProjection) -> EvidenceDraft:
+        return EvidenceDraft(
+            film_id=film.id, source_url=str(self.reading.url), source_title=self.reading.title,
+            locator=self.reading.publication, body=self.reading.summary or self.passage,
+            kind=EvidenceKind.EDITORIAL,
+        )
+
+
+def reading_excerpt(text: str, film: FilmProjection) -> str | None:
+    terms = list(re.finditer(r"[^\W_]+", text))
+    keys = [search_key(term[0]) for term in terms]
+    aliases = [search_key(title).split() for title in (film.title, film.original_title) if search_key(title)]
+    mention = next((
+        index for index in range(len(terms))
+        if any(keys[index:index + len(alias)] == alias for alias in aliases)
+    ), 0)
+    start = terms[mention - 4].start() if mention > 4 else 0
+    words = text[start:].split()
+    if not words:
+        return None
+    return ("…" if start else "") + " ".join(words[:20]) + ("…" if len(words) > 20 else "")
+
+
+def film_passage(film: FilmProjection, headline: str, text: str) -> str:
+    titles = {film.title, film.original_title} - {""}
+    identities = {str(film.year), *film.director.split(" / ")} - {""}
+    headline_key = search_key(headline)
+    title_in_headline = any(contains_term(headline_key, title) for title in titles)
+    dedicated = title_in_headline and any(
+        contains_term(search_key(text), identity) for identity in identities
+    )
+    sentences = re.split(r"(?<!\bMr\.)(?<!\bMrs\.)(?<!\bDr\.)(?<=[.!?])\s+", text)
+    for index, sentence in enumerate(sentences):
+        normalized = search_key(sentence)
+        if not any(contains_term(normalized, title) for title in titles) and not (index == 0 and title_in_headline):
+            continue
+        # Start at the film mention in long festival roundups and skip menus and introductions.
+        excerpt = " ".join(sentences[index:index + 3])[:900].strip()
+        if re.search(r"\b(?:prod co|cast|print source)\s*:", excerpt, re.I):
+            continue
+        if re.search(r"\b(?:at the end|closing scene|final shot|the film ends)\b", excerpt, re.I):
+            continue
+        context = search_key(f"{headline} {excerpt}")
+        if len(excerpt.split()) >= 10 and (
+            dedicated or any(contains_term(context, identity) for identity in identities)
+        ):
+            return excerpt
+    return ""
+
+
+class EditorialResearch:
+    def __init__(self, http: httpx.AsyncClient, options: ToolsOptions, crawler: WebCrawler):
+        self.http = http
+        self.options = options
+        self.searches = []
+        if options.brave.enabled:
+            self.searches.append(BraveSearchProvider(http, options.brave))
+        if options.duckduckgo.enabled:
+            self.searches.append(DuckDuckGoSearchProvider(
+                options.duckduckgo, options.crawler.model_copy(update={"enabled": False}), crawler,
+            ))
+
+    async def find(
+        self, film: FilmProjection, saved: Sequence[EvidenceRecord] = (), *, focus: str = "", live: bool = True,
+    ) -> list[EditorialMatch]:
+        matches = self.saved_matches(film, saved)
+        covered = {urlsplit(url).hostname.removeprefix("www.") for url in matches}
+        core_hosts = [host for host in CORE_PUBLICATIONS if host not in covered]
+        if live and core_hosts:
+            references = [normalize_reference_url(url) for url in await self._reference_urls(film)]
+            extended_hosts = [
+                host for host in EXTENDED_PUBLICATIONS
+                if host not in covered and (
+                    host == "filmcomment.com" or any(article_url(url, host) for url in references)
+                )
+            ]
+            hosts = [*core_hosts, *extended_hosts]
+            found = await asyncio.gather(*(
+                self._find_at(host, film, focus, tuple(url for url in references if article_url(url, host)))
+                for host in hosts
+            ))
+            matches.update((str(match.reading.url), match) for match in found if match)
+        return list(matches.values())
+
+    @staticmethod
+    def saved_matches(film: FilmProjection, saved: Sequence[EvidenceRecord]) -> dict[str, EditorialMatch]:
+        matches = {
+            str(row.reading.url): EditorialMatch(row.reading)
+            for row in READINGS if row.matches(film)
+        }
+        for item in saved:
+            matches.setdefault(item.source_url, EditorialMatch(FurtherReading(
+                publication=item.locator, title=item.source_title, url=item.source_url, origin="research",
+                excerpt=reading_excerpt(item.body, film),
+            ), item.body))
+        return matches
+
+    async def _reference_urls(self, film: FilmProjection) -> list[str]:
+        if not self.options.wikipedia_enabled or not self.options.crawler.enabled:
+            return []
+        try:
+            return await WikipediaSearchProvider(self.http).film_reference_urls(film)
+        except (httpx.HTTPError, ValueError):
+            logger.debug("Editorial reference lookup unavailable")
+            return []
+
+    async def _find_at(
+        self, host: str, film: FilmProjection, focus: str, references: tuple[str, ...],
+    ) -> EditorialMatch | None:
+        checked = set()
+        reference = None
+        try:
+            async with asyncio.timeout(8):
+                async for rows in self._candidates_at(host, film, focus, references):
+                    for row in rows:
+                        if not article_url(row.url, host):
+                            continue
+                        title = row.title
+                        passage = film_passage(film, title, row.snippet)
+                        if not passage and self.options.crawler.enabled and row.url not in checked:
+                            checked.add(row.url)
+                            try:
+                                page = await self._publisher_page(row.url, host)
+                            except httpx.HTTPStatusError:
+                                slug = search_key(urlsplit(row.url).path.split("/")[-1])
+                                if host in {"criterion.com", "rogerebert.com"} and row.url in references and any(
+                                    len(search_key(name)) >= 3 and contains_term(slug, name)
+                                    for name in (film.title, film.original_title)
+                                ):
+                                    label = "Criterion essay" if host == "criterion.com" else "RogerEbert.com review"
+                                    reference = EditorialMatch(FurtherReading(
+                                        publication=PUBLICATIONS[host], title=f"{label} on {film.title}",
+                                        url=row.url, origin="reference",
+                                    ))
+                            else:
+                                if page:
+                                    title, content = page
+                                    passage = film_passage(film, title, content)
+                        if passage:
+                            return EditorialMatch(FurtherReading(
+                                publication=PUBLICATIONS[host], title=title or row.title, url=row.url, origin="web",
+                                excerpt=reading_excerpt(passage, film),
+                            ), passage)
+        except (TimeoutError, ValueError):
+            logger.debug("Editorial search ended without a match publication=%s", PUBLICATIONS[host])
+        return reference
+
+    async def _publisher_page(self, url: str, host: str) -> tuple[str, str] | None:
+        # For these three fixed hosts and validated article paths, never follow a publisher redirect.
+        # General web fetches still use the crawler's public-address and redirect checks.
+        if not article_url(url, host):
+            return None
+        try:
+            async with self.http.stream(
+                "GET", url, headers={"User-Agent": self.options.crawler.user_agent}, timeout=3,
+                follow_redirects=False,
+            ) as response:
+                if response.status_code in {401, 403, 429}:
+                    response.raise_for_status()
+                if response.status_code != 200 or "text/html" not in response.headers.get("content-type", ""):
+                    return None
+                parser = VisibleHTMLParser()
+                decoder = getincrementaldecoder(response.encoding or "utf-8")(errors="replace")
+                remaining = self.options.crawler.response_byte_limit
+                async for chunk in response.aiter_bytes():
+                    parser.feed(decoder.decode(chunk[:remaining]))
+                    remaining -= len(chunk)
+                    if remaining <= 0:
+                        break
+                parser.close()
+                return parser.title, parser.text
+        except (httpx.RequestError, LookupError, ValueError):
+            return None
+
+    async def _candidates_at(
+        self, host: str, film: FilmProjection, focus: str, references: tuple[str, ...],
+    ) -> AsyncIterator[list[SearchResult]]:
+        if host == "sensesofcinema.com" and self.options.crawler.enabled:
+            yield await self._wp_candidates(film, SENSES_API, "sensesofcinema.com")
+        if host == "filmcomment.com" and self.options.crawler.enabled:
+            yield await self._wp_candidates(film, FILM_COMMENT_API, "filmcomment.com")
+        if references:
+            ordered = sorted(references, key=lambda url: not contains_term(
+                search_key(urlsplit(url).path.split("/")[-1]), film.title,
+            ))
+            yield [SearchResult(url, "", "") for url in ordered[:3]]
+        if host not in CORE_PUBLICATIONS:
+            return
+        titles = [film.title]
+        if film.original_title and search_key(film.original_title) != search_key(film.title):
+            titles.append(film.original_title)
+        for title in titles:
+            query = f'site:{host} "{title}" {film.director}'
+            for search in self.searches:
+                try:
+                    rows = await search.search(query)
+                except (httpx.HTTPError, ValueError):
+                    continue
+                yield [SearchResult(row.source_url, row.source_title, row.body) for row in rows]
+        if focus and self.searches:
+            query = f'site:{host} "{film.title}" {search_key(focus)[:100]}'
+            try:
+                rows = await self.searches[0].search(query)
+            except (httpx.HTTPError, ValueError):
+                return
+            yield [SearchResult(row.source_url, row.source_title, row.body) for row in rows]
+
+    async def _wp_candidates(self, film: FilmProjection, api_base: str, host: str) -> list[SearchResult]:
+        queries = dict.fromkeys(filter(None, (film.original_title, film.title, film.director)))
+        responses = await asyncio.gather(*(self._wp_search(api_base, query) for query in queries))
+        candidates = {}
+        for rows in responses:
+            for row in rows:
+                if not isinstance(row, dict) or type(row.get("id")) is not int:
+                    continue
+                title = row.get("title")
+                if isinstance(title, str) and not contains_term(search_key(title), "world poll"):
+                    candidates.setdefault(row["id"], row)
+
+        def priority(row):
+            heading = search_key(re.sub(r"<[^>]+>", "", unescape(row["title"])))
+            exact = any(contains_term(heading, title) for title in (film.title, film.original_title))
+            essay = any(section in str(row.get("url", "")) for section in ("/cteq/", "/feature-articles/", "/article/"))
+            return not exact, not essay
+
+        ordered = sorted(candidates.values(), key=priority)
+        posts = await asyncio.gather(*(self._wp_post(api_base, host, row) for row in ordered[:4]))
+        return [post for post in posts if post is not None]
+
+    async def _wp_search(self, api_base: str, query: str) -> list[object]:
+        try:
+            response = await self.http.get(
+                f"{api_base}/search", params={"search": query, "per_page": 5, "subtype": "post"},
+                timeout=3, follow_redirects=False,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return payload[:5] if isinstance(payload, list) else []
+        except (httpx.HTTPError, ValueError):
+            logger.debug("WordPress editorial search unavailable api=%s", api_base)
+            return []
+
+    async def _wp_post(self, api_base: str, host: str, row: object) -> SearchResult | None:
+        if not isinstance(row, dict):
+            return None
+        post_id, url, headline = row.get("id"), row.get("url"), row.get("title")
+        if not (type(post_id) is int and post_id > 0 and isinstance(url, str)
+                and isinstance(headline, str) and article_url(url, host)):
+            return None
+        title = unescape(re.sub(r"<[^>]+>", "", headline))
+        try:
+            response = await self.http.get(f"{api_base}/posts/{post_id}", params={"_fields": "content"},
+                                           timeout=3, follow_redirects=False)
+            response.raise_for_status()
+            payload = response.json()
+            content = payload.get("content") if isinstance(payload, dict) else None
+            if isinstance(content, dict) and isinstance(content.get("rendered"), str):
+                parser = VisibleHTMLParser()
+                parser.feed(content["rendered"][:self.options.crawler.response_byte_limit])
+                parser.close()
+                return SearchResult(url, title, parser.text)
+        except (httpx.HTTPError, ValueError):
+            logger.debug("WordPress editorial post lookup unavailable api=%s", api_base)
+        return SearchResult(url, title)
 
 
 class WebFilmReadings:
     def __init__(self, options: Options[ToolsOptions]):
         self.options = options.value
 
-    async def for_film(self, film: FilmProjection) -> list[FurtherReading]:
-        readings = [row.reading for row in READINGS if row.matches(film)]
-        covered = {"BFI / Sight and Sound" if row.publication == "BFI" else row.publication for row in readings}
-        hosts = [host for host, publication in PUBLICATIONS.items() if publication not in covered]
-        if not hosts:
-            return readings
-        # Find article links on demand. The search results do not become historical claims.
+    async def for_film(
+        self, film: FilmProjection, saved: Sequence[EvidenceRecord] = (), *, live: bool = False,
+    ) -> list[FurtherReading]:
+        if not live:
+            return [match.reading for match in EditorialResearch.saved_matches(film, saved).values()]
         async with httpx.AsyncClient(timeout=min(self.options.timeout_seconds, 6)) as http:
-            search = (BraveSearchProvider(http, self.options.brave) if self.options.brave.enabled else
-                      DuckDuckGoSearchProvider(self.options.duckduckgo,
-                                               self.options.crawler.model_copy(update={"enabled": False}),
-                                               WebCrawler(http, self.options.crawler)))
-
-            async def find(host):
-                try:
-                    query = f'site:{host} "{film.title}" {film.year} {film.director}'
-                    rows = await asyncio.wait_for(search.search(query), timeout=7)
-                    for row in rows:
-                        if not article_url(row.source_url, host):
-                            continue
-                        headline = search_key(row.source_title)
-                        details = search_key(f"{row.source_title} {row.body}")
-                        matches_title = any(contains_term(headline, title) for title in {film.title, film.original_title})
-                        matches_film = contains_term(details, str(film.year)) or any(
-                            contains_term(details, director) for director in film.director.split(" / ")
-                        )
-                        if matches_title and matches_film:
-                            return FurtherReading(publication=PUBLICATIONS[host], title=row.source_title,
-                                                  url=row.source_url)
-                except (TimeoutError, httpx.HTTPError, ValueError):
-                    pass
-                return None
-
-            found = await asyncio.gather(*(find(host) for host in hosts))
-        return readings + [row for row in found if row is not None]
+            crawler = WebCrawler(http, self.options.crawler)
+            matches = await EditorialResearch(http, self.options, crawler).find(film, saved)
+        return [match.reading for match in matches]

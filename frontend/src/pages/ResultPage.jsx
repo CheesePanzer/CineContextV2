@@ -44,7 +44,7 @@ export default function ResultPage() {
   return <main className="result-page page-frame">
     <div className="result-actions"><Link to="/research/new">New research</Link><button type="button" onClick={() => removeRun({...run.constraints, run_id: runId})}>Delete research</button></div>
     {actionError && <p className="form-error" role="alert">{actionError}</p>}
-    <Results run={run} onRetryGuide={retryGuide} retryingGuide={retrying}
+    <Results key={run.run_id} run={run} onRetryGuide={retryGuide} retryingGuide={retrying}
       onReviewNearby={canBroaden ? reviewNearbyCriteria : undefined} />
   </main>;
 }

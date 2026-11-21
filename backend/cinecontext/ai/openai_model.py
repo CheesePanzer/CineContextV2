@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from .guide_draft import GuideDraft
 from .ports import ModelUnavailableError
 from .tacc_transport import TACC_NOT_READY_CODE, TaccSdkTransport
 from .types import (
+    EvidenceKind,
     ModelApiStyle,
     ModelMessageRole,
     ModelMode,
@@ -31,8 +33,15 @@ from .types import (
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[3]
 QWEN_TOKEN_LIMITS = {
-    ParsedRequest: 1000, Plan: 700, AssessmentDraft: 2400, TimelineResearch: 2400, GuideDraft: 3000,
+    ParsedRequest: 1000, Plan: 700, AssessmentDraft: 2400, TimelineResearch: 2400, GuideDraft: 3800,
 }
+
+
+def _truncate_body(body: str, limit: int) -> str:
+    if len(body) <= limit:
+        return body
+    cut = body[:limit].rsplit(" ", 1)[0]
+    return (cut if len(cut) >= limit // 2 else body[:limit]).rstrip()
 
 
 class ReferenceSelection(BaseModel):
@@ -150,7 +159,7 @@ class OpenAIModel:
                     if response.finish_reason == "length" and schema is GuideDraft:
                         system += (
                             " Use compact JSON. Keep one sentence and one evidence ID per film reason, "
-                            "one shared primer if supported, and empty optional lists elsewhere. "
+                            "up to three concise shared primer notes if supported, and empty optional lists elsewhere. "
                             "Keep every selected film and the full viewing order."
                         )
         except Exception as error:
@@ -187,6 +196,18 @@ class OpenAIModel:
         request_options = {}
         if self.options.json_response:
             request_options["response_format"] = {"type": StructuredOutputType.JSON_OBJECT.value}
+            if schema is GuideDraft and self.options.tacc_job_id:
+                guide_schema = GuideDraft.model_json_schema()
+                for shape in (guide_schema, *guide_schema.get("$defs", {}).values()):
+                    if shape.get("type") == "object":
+                        shape["additionalProperties"] = False
+                film_count = len(json.loads(payload)["films"])
+                for field in ("film_guides", "viewing_order"):
+                    guide_schema["properties"][field].update(minItems=film_count, maxItems=film_count)
+                request_options["response_format"] = {
+                    "type": StructuredOutputType.JSON_SCHEMA.value,
+                    "json_schema": {"name": "viewing_guide", "schema": guide_schema},
+                }
         max_tokens = self.options.max_tokens
         if max_tokens is None and self.mode == ModelMode.TACC:
             max_tokens = QWEN_TOKEN_LIMITS.get(schema, 3000)
@@ -277,6 +298,9 @@ class OpenAIModel:
             "Avoid vague wording like 'the period of [title]' in story_period. "
             "Never put a work's title by itself in story_period. Put the title in reference_queries. "
             "Extract facts explicitly supplied in the question. "
+            "A named work can be inspiration for a broader topic. If the user gives an explicit wider scope "
+            "such as medieval European history, use that scope in the theme and story setting without "
+            "converting the work's specific location or year into a requirement. "
             "If the period or region depends on identifying a named work, include its title as written and up to two "
             "likely alternate titles in reference_queries. Use concise search keywords. A variant may correct a "
             "mistranslation or misspelling. Leave reference_queries empty for broad topics. "
@@ -324,16 +348,23 @@ class OpenAIModel:
         return await self.complete(
             Plan,
             "Write a short English keyword query for background research. Supply two to four separate discovery_terms for a "
-            "film catalog, using short tags such as middle ages, bohemia, or state surveillance. Use the confirmed "
-            "story setting rather than the reference work's name as a tag. Favor specific places, periods, or "
-            "traditions for discovery; do not use tone or style alone as a discovery term. Rank backup films by relevance. "
+            "film catalog, using short tags such as middle ages, bohemia, or state surveillance. For historical or "
+            "thematic comparisons inspired by a reference work, use the confirmed story setting rather than the "
+            "reference work's name as a tag. However, when the user asks what to watch beforehand to prepare for a "
+            "named sequel or upcoming franchise entry, include the franchise, series, or character name in "
+            "discovery_terms, exclude that target film itself from hints, omit separate-continuity animated or "
+            "rebooted adaptations when the target belongs to an established live-action continuity, and prioritize "
+            "direct predecessors plus essential same-continuity crossover films (such as the character's debut or "
+            "major turning points) in hints. Favor specific places, periods, "
+            "traditions, or franchises for discovery; do not use tone or style alone as a discovery term. Rank backup films by relevance. "
             "Use search terms rather than a complete sentence. "
             "Use the submitted form fields as the controlling criteria if they conflict with the original topic. "
             "Use preferred genres and styles to rank the leads. Treat avoid as an exclusion. With a supplied "
             "story_period and setting_match=strict, prioritize films actually set there and then. With nearby, "
             "include well-supported films from nearby periods or regions after direct matches. "
-            "The requested count is for the finished guide. Return up to six known feature films, only where you can name "
-            "a plausible match. Leave backup slots empty when unsure. Exclude television series and films set in distant "
+            "The requested count is for the finished guide. Aim to return six well-known feature films that strictly "
+            "respect any requested region or release year range (for example, only 1940–1949 releases for 1940s films), "
+            "only where you can name a plausible match. Leave backup slots empty when unsure. Exclude television series and films set in distant "
             "periods when the setting is the main interest. Use English release titles and release years for TMDB lookup. If a story setting was supplied, focus "
             "the background query on that place and period. Otherwise use the named reference when relevant.",
             constraints.model_dump(),
@@ -342,16 +373,28 @@ class OpenAIModel:
     async def assess(self, constraints, films, evidence):
         film_numbers = {film.id: number for number, film in enumerate(films, start=1)}
         evidence = [item for item in evidence if item.film_id is None or item.film_id in film_numbers]
+        body_limit = min(650, max(240, 16000 // max(1, len(evidence))))
         draft = await self.complete(AssessmentDraft,
             "Evaluate every candidate once against all requested criteria using the supplied metadata and sources. "
+            "Return exactly one decision for every numbered film in films, including unrelated films or a named target "
+            "film the user is preparing to watch (reject those explicitly rather than omitting them). "
             "Judge each film on its merits. A later step applies the requested count, so accept every suitable "
             "candidate and do not reject a film just because enough others qualify. "
             "Use the integer film number in each decision and cite integer source numbers in its sources list. "
             "Use only sources for that film or shared sources where film is null. "
             "Use the submitted form fields as the controlling criteria if they conflict with the original topic. "
-            "For beginners to a series, favor accessible origin stories, standalone entries, and early milestones. "
-            "A finale that assumes substantial prior viewing is a secondary match for a beginner's request, "
-            "even when it is an important milestone. Consider a direct predecessor on its own merits. "
+            "When the user asks what to watch beforehand to prepare for a named sequel or upcoming film, reject that "
+            "target film itself, reject separate-continuity adaptations, and accept direct predecessors plus essential "
+            "same-continuity crossover films that establish the character's introduction, key relationships, or major "
+            "turning points leading into that film. "
+            "For a beginner's starter request asking where to begin or how a series is initially built, favor accessible "
+            "origin stories, standalone entries, and early milestones, and treat a finale that assumes substantial prior "
+            "viewing as a secondary match even when it is an important milestone. When the user instead asks for a "
+            "franchise's overall worldview, timeline, or complete narrative arc, treat defining cross-phase milestones "
+            "and culminating finales as primary matches, and mark redundant early origin stories as secondary so the "
+            "primary matches span the full arc from origin to climax. Consider a direct predecessor on its own merits. "
+            "For a request to establish a shared universe, prioritize films that introduce distinct parts "
+            "of that world or show how those parts connect. "
             "For explicit genre and style preferences, set preference_fit to 2 for clear source support for the "
             "main preferences, 1 for partial support, or 0 for weak or unknown support or no preferences. "
             "Treat 'I like' and 'I prefer' as ranking preferences. A well-sourced core-topic match can be accepted "
@@ -373,21 +416,27 @@ class OpenAIModel:
             "in the cited film material. If evidence is missing, return needs_evidence and a follow-up query. "
             "Every accepted candidate must cite a non-metadata source that discusses the film. Prefer distributors, "
             "film institutions, and scholarship. Use primary relevance for evidence that addresses the main interest. "
+            "Evaluate editorial passages for a film-specific observation that supports the requested theme. "
+            "A passing mention or a shared director does not support relevance. Request targeted follow-up with "
+            "a film title and the missing topic when the available passages are insufficient. "
             "Use secondary for a thematic or atmospheric match and explain any differences in period or region. "
             "Reject films that fail an explicit requirement.",
             {"constraints": constraints.model_dump(mode="json"),
              "films": [
-                 {**film.model_dump(mode="json", exclude={"id"}), "film": film_numbers[film.id]}
+                 {**film.model_dump(mode="json", exclude={"id", "poster_path", "tmdb_id", "imdb_id", "releases"}),
+                  "film": film_numbers[film.id]}
                  for film in films
              ],
              "evidence": [
-                 {**item.model_dump(mode="json", exclude={"id", "film_id"}),
+                 {**item.model_dump(mode="json", exclude={"id", "film_id", "passage_id", "source_url", "retrieved_at"}),
+                  "body": _truncate_body(item.body, body_limit),
                   "source": number, "film": film_numbers.get(item.film_id)}
                  for number, item in enumerate(evidence, start=1)
              ]})
         return draft.resolve(films, evidence)
 
     async def timeline(self, constraints, films, evidence):
+        body_limit = min(800, max(300, 18000 // max(1, len(evidence))))
         return await self.complete(TimelineResearch,
             "Extract story, myth, and history events using evidence IDs from this run. "
             "For story, return at most one spoiler-free setting and period per film. Use sort_year when the sources support a date. "
@@ -411,16 +460,28 @@ class OpenAIModel:
             "myth event you can omit film links. Story events require exactly one linked film. "
             "Mark adaptations and alternate versions explicitly.",
             {"constraints": constraints.model_dump(mode="json"),
-             "films": [film.model_dump(mode="json") for film in films],
-             "evidence": [item.model_dump(mode="json") for item in evidence]})
+             "films": [film.model_dump(mode="json", exclude={"poster_path", "tmdb_id", "imdb_id"}) for film in films],
+             "evidence": [
+                 {**item.model_dump(mode="json", exclude={"passage_id", "source_url", "retrieved_at"}),
+                  "body": _truncate_body(item.body, body_limit)}
+                 for item in evidence
+             ]})
 
     async def generate(self, constraints, films, evidence, correction=""):
+        evidence = sorted(evidence, key=lambda item: item.kind != EvidenceKind.EDITORIAL)
         film_numbers = {film.id: number for number, film in enumerate(films, start=1)}
+        body_limit = min(900, max(350, 20000 // max(1, len(evidence))))
         draft = await self.complete(GuideDraft,
             "Write an English viewing guide with spoiler-free notes. Cite claims using integer source numbers "
             "from the supplied sources. Every film's reason must cite a non-metadata source that connects the film "
             "to the topic. A shared source with film=null can support this reason when it explicitly discusses "
             "the film and its relevance. A film's notes can use its own film sources or shared sources. "
+            "When a film has any source with kind='editorial' (such as Criterion, BFI / Sight and Sound, Senses of Cinema, "
+            "The Guardian, BBC Culture, Film Comment, or Variety) in sources, you MUST cite at least one editorial source "
+            "in that film's reason and weave its critical observation into the recommendation alongside Wikipedia or metadata "
+            "context, rather than citing Wikipedia alone. "
+            "Attribute critical opinions to the publication. Write film titles in plain text without Markdown asterisks. "
+            "Do not add an editorial citation based on a passing mention. "
             "Each selected film number must occur exactly once in film_guides and once in viewing_order. Start with the film "
             "that best addresses the user's main interest. Compare films with the reference work without implying "
             "that either inspired the other unless the sources say so. Explain how each film relates and note any documented differences "
@@ -430,16 +491,25 @@ class OpenAIModel:
             "Explain which confirmed genre or style preferences the selections meet if the evidence supports it. "
             "Use only claims directly supported by the sources, favoring research institutions and archives for historical facts. "
             "Use only dates stated in a cited source, and call out a nearby setting as such. "
-            "Open with two short sentences on the historical or cultural context. Add at most two general notes and "
-            "two discussion questions. For each film, write a one-sentence recommendation reason and at most one "
-            "short primer or background note. Use one or two source numbers for each claim. "
+            "Open with a brief introduction. Before the films, aim for three to five distinct common_primer notes "
+            "of 35 to 55 words each, with short descriptive titles. Give viewers the background they need to "
+            "follow this specific lineup. Cover useful terms, historical or cultural stakes, how to read the "
+            "filmmaking style, or what connects the films. For franchises, explain the setup and viewing sequence; "
+            "for historical or mythic films, distinguish the source tradition or real events from the adaptation. "
+            "Use a different point in each note. Name the relevant films when comparing them, and keep "
+            "period or style claims scoped to the examples that actually support them. A shared primer may cite sources for "
+            "individual selected films when comparing them. Use fewer notes if sources do not support more. "
+            "For each film write a concise recommendation and up to two short practical notes. If two "
+            "publications offer distinct relevant observations, use the second observation in a film note and "
+            "explain what a viewer can look for. Credit the publication and avoid repeating the recommendation. "
+            "Add at most two discussion questions. Use one or two source numbers per claim. "
             "If a validation_issue is provided, correct it and keep optional notes to those with unambiguous support. "
-            "Return compact JSON.",
+            "Return the JSON object on one line. Omit empty optional fields and use only keys from the schema.",
             {"constraints": constraints.model_dump(mode="json"),
              "films": [{"film": film_numbers[film.id], "title": film.title, "release_year": film.year} for film in films],
              "sources": [{
                  "source": number, "film": film_numbers.get(item.film_id), "title": item.source_title,
-                 "kind": item.kind.value, "body": item.body,
+                 "kind": item.kind.value, "publication": item.locator, "body": _truncate_body(item.body, body_limit),
              } for number, item in enumerate(evidence, start=1)],
              "validation_issue": correction})
         return draft.resolve(films, evidence)
@@ -453,11 +523,32 @@ class OpenAIModelProvider:
         self.mode = self.options.mode
         self.logging_options = logging_options.value
         self.jobs = jobs
+        self._probe_lock = asyncio.Lock()
+        self._observed: tuple[ModelReadiness, float] | None = None
+        self._confirmed: tuple[ModelReadiness, float] | None = None
 
     async def readiness(self):
         if job_id := self.jobs.job_id:
-            transport = TaccSdkTransport(self.options.tcloud_bin, job_id, self.options.timeout_seconds)
-            return await transport.readiness(include_timing=True)
+            async with self._probe_lock:
+                if self._observed:
+                    previous, checked_at = self._observed
+                    if previous.job_id == job_id and monotonic() - checked_at < 2:
+                        return previous
+                transport = TaccSdkTransport(self.options.tcloud_bin, job_id, self.options.timeout_seconds)
+                result = await transport.readiness(include_timing=True)
+                checked_at = monotonic()
+                if result.status != "unavailable":
+                    self._confirmed = result, checked_at
+                elif self._confirmed:
+                    confirmed, confirmed_at = self._confirmed
+                    age = int(checked_at - confirmed_at)
+                    if confirmed.job_id == job_id and age < 120:
+                        result = ModelReadiness(
+                            "unavailable", job_id, last_confirmed_status=confirmed.status,
+                            last_confirmed_seconds=age,
+                        )
+                self._observed = result, checked_at
+                return result
         if self.mode == ModelMode.TACC:
             try:
                 async with httpx.AsyncClient(timeout=4) as http:
