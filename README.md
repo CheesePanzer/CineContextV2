@@ -8,14 +8,15 @@ The repository includes a deterministic **demo mode** (no credentials required) 
 
 ### Prerequisites
 
-- Python 3.14, Node.js 22.12+, `npm`, and PostgreSQL (`initdb` and `pg_ctl` on `PATH` for local DB setup, or an existing PostgreSQL instance via `DATABASE_URL`).
-- For live TACC mode only: the course `tcloud` CLI configured for the `tacc` partition (1 node, `gres=gpu:2`) and a TMDB read access token (`APP__TOOLS__TMDB__ACCESS_TOKEN`).
+- Python 3.14, Node.js 22.12+, `npm`, and PostgreSQL (`initdb` and `pg_ctl` on `PATH` for automatic local DB setup, or an existing PostgreSQL instance via `DATABASE_URL=postgresql+asyncpg://user:password@host:5432/dbname`).
+- For live TACC mode only: the course `tcloud` CLI authenticated for the `tacc` partition (1 node, `gres=gpu:2`) and a TMDB v4 Read Access Token (`APP__TOOLS__TMDB__ACCESS_TOKEN`).
 
 ### Start the demo (no API keys or TACC required)
 
-Use a clean checkout (or remove/override any local `.env` selecting `production`/`tacc`). From the repository root on macOS or Linux:
+Use a clean checkout (or remove/override any local `.env` selecting `production`/`tacc`). On macOS or Linux:
 
 ```bash
+git clone https://github.com/CheesePanzer/CineContextV2.git && cd CineContextV2
 python3.14 -m venv .venv
 CINECONTEXT_PYTHON="$PWD/.venv/bin/python" ./scripts/start.sh
 ```
@@ -27,7 +28,7 @@ py -3.14 -m venv .venv
 .\scripts\start.ps1
 ```
 
-The launcher installs backend dependencies, initializes and migrates PostgreSQL, builds the frontend (`npm ci && npm run build`), and serves the app at `http://127.0.0.1:8765`. Readiness can be verified non-interactively via `curl -sf http://127.0.0.1:8765/api/health`, which returns `{"status":"ok","model_mode":"mock",...}`.
+The launcher installs backend dependencies, initializes and migrates PostgreSQL, builds the frontend (`npm ci && npm run build`), and runs Uvicorn in the foreground at `http://127.0.0.1:8765`. Start it in a background process or separate terminal and verify readiness non-interactively via `curl -sf http://127.0.0.1:8765/api/health`, which returns `{"status":"ok","model_mode":"mock",...}`.
 
 ### Small end-to-end verification example
 
@@ -41,7 +42,7 @@ The launcher installs backend dependencies, initializes and migrates PostgreSQL,
 
 ### Enable live research with TACC
 
-Create `.env` from `.env.example` (see [docs/deployment.md](docs/deployment.md#tacc-qwen)):
+Create `.env` from `.env.example` (omit `APP__MODEL__TCLOUD_BIN` if `tcloud` is already on `PATH`; see [docs/deployment.md](docs/deployment.md#tacc-qwen)):
 
 ```env
 CINECONTEXT_APP=production
