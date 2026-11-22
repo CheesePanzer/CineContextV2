@@ -9,7 +9,7 @@ The repository includes a deterministic **demo mode** (no credentials required) 
 ### Prerequisites
 
 - Python 3.14, Node.js 22.12+, `npm`, and PostgreSQL (`initdb` and `pg_ctl` on `PATH` for automatic local DB setup, or an existing PostgreSQL instance via `DATABASE_URL=postgresql+asyncpg://user:password@host:5432/dbname`).
-- For live TACC mode only: the course `tcloud` CLI authenticated for the `tacc` partition (1 node, `gres=gpu:2`) and a TMDB v4 Read Access Token (`APP__TOOLS__TMDB__ACCESS_TOKEN`).
+- For live TACC mode only: the course `tcloud` CLI authenticated for the `tacc` partition (1 node, `gres=gpu:2`) and a TMDB v4 Read Access Token (`APP__TOOLS__TMDB__ACCESS_TOKEN`; our team's read-only API token is lent below for temporary grading use in case the teaching team does not have time to apply for one).
 
 ### Start the demo (no API keys or TACC required)
 
@@ -42,7 +42,7 @@ The launcher installs backend dependencies, initializes and migrates PostgreSQL,
 
 ### Enable live research with TACC
 
-TACC communication reuses the host's existing `tcloud` login (`tcloud ps` must list the `tacc` partition; no extra TACC API key or SSH tunnel is required). Create `.env` from `.env.example` (omit `APP__MODEL__TCLOUD_BIN` if `tcloud` is already on `PATH`; see [docs/deployment.md](docs/deployment.md#tacc-qwen)). If you do not have time to register a TMDB v4 Read Access Token, you may temporarily use the team's read-only grading token below (to be revoked after course grading):
+TACC communication reuses the host's existing `tcloud` login (`tcloud ps` must list the `tacc` partition; no extra TACC API key or SSH tunnel is required). Create `.env` from `.env.example` (omit `APP__MODEL__TCLOUD_BIN` if `tcloud` is already on `PATH`; see [docs/deployment.md](docs/deployment.md#tacc-qwen)). **Note for the teaching team:** To save time in case you do not have time to apply for your own TMDB API account, we are lending our team's read-only TMDB v4 Read Access Token below for temporary use during grading (to be revoked after course grading concludes):
 
 ```env
 CINECONTEXT_APP=production
