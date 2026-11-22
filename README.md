@@ -42,7 +42,7 @@ The launcher installs backend dependencies, initializes and migrates PostgreSQL,
 
 ### Enable live research with TACC
 
-Create `.env` from `.env.example` (omit `APP__MODEL__TCLOUD_BIN` if `tcloud` is already on `PATH`; see [docs/deployment.md](docs/deployment.md#tacc-qwen)):
+TACC communication reuses the host's existing `tcloud` login (`tcloud ps` must list the `tacc` partition; no extra TACC API key or SSH tunnel is required). Create `.env` from `.env.example` (omit `APP__MODEL__TCLOUD_BIN` if `tcloud` is already on `PATH`; see [docs/deployment.md](docs/deployment.md#tacc-qwen)). If you do not have time to register a TMDB v4 Read Access Token, you may temporarily use the team's read-only grading token below (to be revoked after course grading):
 
 ```env
 CINECONTEXT_APP=production
@@ -50,7 +50,7 @@ APP_ENVIRONMENT=tacc
 CINECONTEXT_PORT=8765
 CINECONTEXT_DB_PORT=55438
 APP__MODEL__TCLOUD_BIN=/absolute/path/to/tcloud
-APP__TOOLS__TMDB__ACCESS_TOKEN=<YOUR_TMDB_READ_ACCESS_TOKEN>
+APP__TOOLS__TMDB__ACCESS_TOKEN=eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJjNTAzMmY0ZmJmYTA0NjYyZTRjM2QwN2JjMjMzOWI4ZSIsIm5iZiI6MTc5Mzc4MTY0Ni43MjMsInN1YiI6IjZhZWFlZjhlMmZiNTRiYzJlYjE3ZTNkNSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.4Dtj0a9lfcV3GPA0n0Xwo9UO4UGex9g_MtuDAjCqTAs
 ```
 
 Submit a 1-hour 2×GPU job and start the app (or pass an existing `<JOB_ID>` instead of `--submit-tacc`):
